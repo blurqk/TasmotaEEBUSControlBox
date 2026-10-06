@@ -24,6 +24,26 @@ This fork adds **TinyC** — a C-subset compiler and VM running as `XDRV_124`. W
 
 <hr></hr>
 
+## ⚡ EEBUS control box: Weidmüller ERC support
+
+This repository ([blurqk/TasmotaEEBUSControlBox](https://github.com/blurqk/TasmotaEEBUSControlBox)) only adds a few extensions to the existing EEBUS Guard driver and its web UI. All other work, and the credit for it, belongs to the original authors:
+
+- **Tasmota** — [Theo Arends](https://github.com/arendst/Tasmota) and contributors
+- **This fork's base** including TinyC and scripting — [gemu2015](https://github.com/gemu2015/Sonoff-Tasmota) (Gerhard Mutz)
+- **EEBUS Guard driver** (`xdrv_126_eebus_guard.ino`) and its web UI (`steuerbox.html`) — [meierchen006](https://github.com/meierchen006)
+- The driver in turn builds on the EEBUS module of the [Tinkerforge esp32-firmware](https://github.com/Tinkerforge/esp32-firmware) (LGPL) and follows the behaviour of [enbility eebus-go](https://github.com/enbility/eebus-go) and [evcc](https://github.com/evcc-io/evcc)
+
+**Additions in this repository** (branch `feat/erc-ship-pairing`):
+
+- **SHIP Pairing Service** (`EEBusPair <QR text>`) for devices that offer no SKI approval, such as the Weidmüller EEBUS Relais Converter (ERC): the control box announces itself with the secret from the device's pairing QR code
+- `EEBusShipId` to set a fixed SHIP ID; brand and model can be set with `EEBUS_ADV_BRAND` / `EEBUS_ADV_MODEL`
+- Fixes: compile-time warning if `USE_MQTT_CLIENT_CERT` is missing (without it no client certificate is sent), IPv4 selection and a crash in the mDNS scan, limit IDs learned per direction, large values ("no limit") read without overflow, `/steuerbox` also opens without a referer
+- Web UI: pairing via QR code, quick buttons (consumption limit 4200 W / no limit, feed-in 0/30/60/100 % of the installed PV power) and output LEDs (S1, S2, W3, W4) based on the limits confirmed by the device
+
+Required in `user_config_override.h`: `USE_EEBUS_GUARD`, `USE_MQTT_CLIENT_CERT` and `USE_UFILESYS`; `steuerbox.html` must be uploaded to the file system. For pairing, control box and device must be in the same network (mDNS).
+
+<hr></hr>
+
 **In light of current events we like to support the people behind _PlatformIO Project_, especially Ivan Kravets, and wish them the strength to help stop the war. See [platformio-is-ukrainian-project-please-help-us-stop-the-war](https://community.platformio.org/t/platformio-is-ukrainian-project-please-help-us-stop-the-war/26330) for what you can do.**
 
 <hr></hr>
