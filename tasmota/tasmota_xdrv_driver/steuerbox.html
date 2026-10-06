@@ -160,6 +160,20 @@
   .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px}
   .sep{border:0;border-top:1px solid var(--line);margin:16px 0}
+  /* Schnellwahl direkt unter den Ueberschriften der Grenzwert-Reiter */
+  .quick{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0 12px}
+  .quick button.sel{outline:2px solid var(--ok);outline-offset:1px}
+  .quick button[disabled]{opacity:.45;cursor:not-allowed}
+  .quick input{width:110px}
+  .quick .hint{margin:0}
+  /* Ausgaenge (Relais-LEDs des Geraets) */
+  .leds{display:flex;gap:24px;flex-wrap:wrap;margin:8px 0}
+  .ledi{display:flex;align-items:center;gap:7px;font-weight:600}
+  .led{display:inline-block;width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:#2a2f36}
+  .led.on{background:var(--ok);border-color:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .led.unknown{background:transparent;border-style:dashed;border-color:var(--muted)}
+  .ledcfg{display:grid;grid-template-columns:40px max-content max-content;gap:6px 10px;align-items:center;margin-top:8px}
+  .ledcfg input{width:70px}
   @media(max-width:640px){.grid2{grid-template-columns:1fr}.row,.act{grid-template-columns:1fr}.ident{grid-template-columns:1fr}}
   .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
   .hide{display:none}
@@ -208,6 +222,29 @@
     </p>
     <p class="hint hide" id="identnach">Neue Identität erzeugt. Jetzt <b>trennen und neu verbinden</b> —
       bestehende Verbindungen laufen noch mit dem alten Zertifikat weiter.</p>
+  </div>
+
+  <!-- ===== KOPPLUNG PER QR-CODE (SHIP Pairing Service) =====
+       Manche Geraete bieten keine SKI-Freigabe an (Weidmueller EEBUS Relais Converter). Sie nehmen
+       eine Steuerbox nur ueber den Pairing-QR-Code auf: dessen Text enthaelt ein Geheimnis, mit dem
+       die Steuerbox ihre Ankuendigung unterschreibt. Der Text wird im Geraet gespeichert, NICHT im
+       Browser — er enthaelt das Geheimnis und gehoert nicht in den Speicher dieses Arbeitsplatzes. -->
+  <div class="card">
+    <h2>Kopplung per QR-Code</h2>
+    <p class="hint" style="margin-top:0">Für Geräte ohne SKI-Freigabe (z.&nbsp;B. Weidmüller EEBUS Relais
+      Converter): den Text des Pairing-QR-Codes am Gerät einfügen. Die Steuerbox kündigt sich damit an,
+      und das Gerät nimmt sie selbst auf. <b>Beide müssen im selben Netz liegen</b> — die Ankündigung
+      läuft über mDNS.</p>
+    <div class="row">
+      <label>QR-Text</label>
+      <input type="text" id="pair_qr" placeholder="SHIP;SKI:…;ID:…;FPH256:…;SPSEC:…;ENDSHIP;" autocomplete="off">
+      <button onclick="pairStart()">Koppeln</button>
+    </div>
+    <div class="row">
+      <label>Zustand</label>
+      <span id="pair_state" class="mono">—</span>
+      <button class="sec" onclick="pairStop()">Beenden</button>
+    </div>
   </div>
 
   <!-- ===== GERAET ===== -->
@@ -291,6 +328,27 @@
        Das ist ihre Eigenschaft, kein Fehler dieses Werkzeugs — an anderen Geräten kann es anders sein.</p>
   </div>
 
+  <!-- ===== AUSGAENGE =====
+       Soll-Zustand der Relais-Ausgaenge eines Relais-Konverters (Weidmueller ERC: S1, S2, W3, W4).
+       Grundlage sind die Grenzen, die das Geraet ZURUECKGEMELDET hat, nicht die Eingabefelder —
+       so laesst sich direkt mit den LEDs am Geraet vergleichen, ob es tut, was ihm gesagt wurde.
+       Die Zuordnung ist einstellbar und wird im Browser gemerkt. -->
+  <div class="card" id="c_leds">
+    <h2>Ausgänge</h2>
+    <p class="hint" style="margin-top:0">Soll-Zustand der Ausgänge aus den vom Gerät bestätigten
+      Grenzen — zum Vergleich mit den LEDs am Gerät. Gestrichelt = noch unbekannt.</p>
+    <p class="warn hide" id="led_pv">Für die Einspeise-Ausgänge fehlt die installierte PV-Leistung
+      (Reiter Einspeisung).</p>
+    <div class="leds" id="leds"></div>
+    <details class="calc">
+      <summary>Ausgänge zuordnen</summary>
+      <div class="ledcfg" id="led_cfg"></div>
+      <p class="hint">Liegt die erlaubte Einspeisung zwischen zwei Stufen, leuchtet die höchste Stufe,
+        die sie nicht überschreitet (45&nbsp;% → 30&nbsp;%). 100&nbsp;% oder keine aktive Grenze: kein
+        Einspeise-Ausgang. Failsafe-Zustände werden nicht angezeigt.</p>
+    </details>
+  </div>
+
   <!-- ===== REITER ===== -->
   <div class="tabs">
     <div class="tab active" data-t="lpc" onclick="tab('lpc')">§ 14a EnWG · Bezug (LPC)</div>
@@ -299,6 +357,11 @@
 
   <section id="t_lpc" class="card">
     <h2>§ 14a EnWG — Bezugsbegrenzung (LPC)</h2>
+    <!-- Schnellwahl: setzt Grenzwert bzw. Freigabe und sendet sofort (Dauer aus dem Feld unten). -->
+    <div class="quick">
+      <button id="q_lpc_on" onclick="lpcSchnell(true)" title="Grenzwert 4200 W setzen und senden">Begrenzen · 4200 W</button>
+      <button id="q_lpc_off" class="sec" onclick="lpcSchnell(false)" title="Begrenzung aufheben">Keine Begrenzung</button>
+    </div>
     <p class="hint" style="margin-top:0">Begrenzt die Leistung, die steuerbare Verbrauchseinrichtungen aus dem Netz beziehen dürfen.</p>
     <!-- Rechner fuer den Grenzwert. Der Grenzwert ist keine freie Zahl: er ergibt sich
          aus den steuerbaren Einrichtungen der Anlage. Wer ihn von Hand eintippt, tippt frueher oder
@@ -388,6 +451,17 @@
 
   <section id="t_lpp" class="card hide">
     <h2>§ 9 EEG — Einspeisebegrenzung (LPP)</h2>
+    <!-- Schnellwahl: Prozent der installierten PV-Leistung, sendet sofort (Dauer aus dem Feld unten).
+         100 % heisst keine Abregelung -> die Grenze wird aufgehoben, nicht auf Volllast gesetzt. -->
+    <div class="quick">
+      <button class="qpv" data-pct="0" onclick="lppSchnell(0)">0 %</button>
+      <button class="qpv" data-pct="30" onclick="lppSchnell(30)">30 %</button>
+      <button class="qpv" data-pct="60" onclick="lppSchnell(60)">60 %</button>
+      <button class="qpv" data-pct="100" onclick="lppSchnell(100)" title="Begrenzung aufheben">100 %</button>
+      <span class="hint">installierte PV-Leistung</span>
+      <input type="number" id="pv_wp" min="0" step="100" placeholder="Wp">
+      <span class="hint">Wp</span>
+    </div>
     <p class="hint" style="margin-top:0">Begrenzt die Leistung, die die Erzeugungsanlage ins Netz einspeisen darf.
        Eingabe als Betrag — auf dem Draht steht der Wert nach Norm negativ.</p>
     <!-- Der Netzbetreiber gibt bei der Einspeisung ueblicherweise einen PROZENTWERT vor. Umgerechnet
@@ -809,9 +883,12 @@
     if(!a || a.length < 2) return null;
     return a[0] * Math.pow(10, a[1]);
   }
+  // Manche Gegenstellen (Weidmueller ERC) melden "keine Grenze" als riesigen Wert.
+  function unbegrenzt(v){ return v !== null && Math.abs(v) >= 1e12; }
   function fmt(a, einheit, digits){
     var v = num(a);
     if(v === null) return '— ' + einheit;
+    if(unbegrenzt(v)) return 'unbegrenzt';
     return v.toLocaleString('de-DE', {maximumFractionDigits: (digits === undefined ? 0 : digits)}) + ' ' + einheit;
   }
   // Zaehlerstand: Wattstunden von der Gegenstelle -> Kilowattstunden fuer die Anzeige.
@@ -1235,6 +1312,9 @@
       var list = (j && j.EEBusData && j.EEBusData.Peers) || [];
       var d = null;
       list.forEach(function(x){ if(x.Ski && x.Ski.toLowerCase() === p.Ski.toLowerCase()) d = x; });
+      istLim.lpc = d ? (d.Lim0 || null) : null;
+      istLim.lpp = d ? (d.Lim1 || null) : null;
+      ausgaengeZeigen();
       if(!d){ return; }                       // nicht verbunden -> Striche stehen lassen
       el('m_power').textContent = fmt(d.Power,   'W');
       // Zaehlerstaende in kWh statt Wattstunden: die Gegenstelle liefert Wattstunden (7.066.465),
@@ -1308,7 +1388,7 @@
     if(!l) return '—';
     var v = num(l.Wert);
     return (l.Aktiv ? 'aktiv' : 'nicht aktiv') +
-           (v === null ? '' : ' · ' + v.toLocaleString('de-DE') + ' W') +
+           (v === null ? '' : (unbegrenzt(v) ? ' · unbegrenzt' : ' · ' + v.toLocaleString('de-DE') + ' W')) +
            (l.Dauer ? ' · ' + l.Dauer : '');
   }
 
@@ -1458,7 +1538,131 @@
   // Anlagenparameter — und eine Steuerbox soll keine Grenzwerte vorhalten, die niemand gesetzt hat.
   // Die Felder der Anlagen-Tabelle kommen dazu — sie werden nicht einzeln aufgezaehlt, sondern
   // aus der Seite eingesammelt. So muss beim Erweitern der Tabelle hier nichts nachgezogen werden.
-  var FELDER = ['lpc_val','lpc_dur','lpp_val','lpp_dur','p_nenn','p_pct'];
+  // --- Kopplung per QR-Code (SHIP Pairing Service) ----------------------------------------------
+  function pairZeigen(j){
+    var p = j && j.EEBusPair; if(!p) return;
+    var t = 'kein Gerät hinterlegt';
+    if(p.Ziel){
+      t = ((p.Marke ? p.Marke + ' ' : '') + (p.Modell || p.Id)) + ' · ' +
+          (p.Verbunden ? 'verbunden' : 'nicht verbunden') + ' · ' +
+          (p.Abgeschlossen ? 'Kopplung abgeschlossen' : (p.Angekuendigt ? 'Ankündigung läuft' : 'keine Ankündigung'));
+    }
+    el('pair_state').textContent = t;
+  }
+  function pairLaden(){ cmd('EEBusPair').then(pairZeigen); }
+  function pairStart(){
+    var q = (el('pair_qr').value || '').trim();
+    if(q.indexOf('SHIP;') !== 0 || q.indexOf('ENDSHIP;') < 0){
+      say('Der QR-Text beginnt mit "SHIP;" und endet mit "ENDSHIP;".'); return;
+    }
+    cmd('EEBusPair ' + q).then(function(j){
+      pairZeigen(j); say(JSON.stringify(j));
+      if(j && j.EEBusPair && j.EEBusPair.Ziel) el('pair_qr').value = '';
+      // Das Geraet prueft die Ankuendigung, danach verbindet die Steuerbox selbst (nach ~20 s)
+      setTimeout(pairLaden, 25000); setTimeout(refresh, 30000); setTimeout(pairLaden, 60000);
+    });
+  }
+  function pairStop(){ cmd('EEBusPair 0').then(function(j){ pairZeigen(j); say(JSON.stringify(j)); }); }
+
+  // --- Schnellwahl ---------------------------------------------------------------------------------
+  var LPC_SCHNELL_W = 4200;   // Mindestleistung einer steuerbaren Verbrauchseinrichtung nach § 14a EnWG
+  var istLim = { lpc: null, lpp: null };   // zuletzt vom Geraet bestaetigte Grenzen
+  // Nach dem Senden Zustand zuegig nachladen, damit LEDs und Markierung folgen (sonst erst nach 20 s)
+  function nachladen(){ setTimeout(refresh, 3000); setTimeout(refresh, 8000); }
+  function lpcSchnell(an){
+    if(needDevice()) return;
+    if(an){ el('lpc_val').value = LPC_SCHNELL_W; sendLpc(); } else { freeLpc(); }
+    nachladen();
+  }
+  function pvWp(){ var v = parseFloat(String(el('pv_wp').value || '').replace(',', '.')); return (v > 0) ? v : 0; }
+  function lppSchnell(pct){
+    if(needDevice()) return;
+    if(pct >= 100){ freeLpp(); nachladen(); return; }   // 100 % = keine Abregelung
+    var wp = pvWp();
+    if(!wp){ say('Erst die installierte PV-Leistung eintragen.'); el('pv_wp').focus(); return; }
+    el('lpp_val').value = Math.round(wp * pct / 100);   // Betrag; das Vorzeichen setzt der Treiber
+    lppDiffZeigen();
+    sendLpp();
+    nachladen();
+  }
+
+  // --- Ausgaenge (LEDs) ----------------------------------------------------------------------------
+  var LED_VORGABE = [ {n:'S1', q:'LPP', s:60}, {n:'S2', q:'LPP', s:30}, {n:'W3', q:'LPP', s:0}, {n:'W4', q:'LPC', s:0} ];
+  var ledRegeln = (function(){
+    try {
+      var v = JSON.parse(localStorage.getItem('eebus_leds'));
+      if(Array.isArray(v) && v.length === LED_VORGABE.length) return v;
+    } catch(err){}
+    return LED_VORGABE.map(function(r){ return {n:r.n, q:r.q, s:r.s}; });
+  })();
+  function ledSichern(){ try { localStorage.setItem('eebus_leds', JSON.stringify(ledRegeln)); } catch(err){} }
+
+  // erlaubte Einspeisung in % der installierten Leistung laut Geraet; 100 = keine Grenze, null = unbekannt
+  function einspeisungPct(){
+    var l = istLim.lpp;
+    if(!l) return null;
+    var v = num(l.Wert);
+    if(!l.Aktiv || v === null || unbegrenzt(v)) return 100;
+    var wp = pvWp();
+    if(!wp) return null;
+    return Math.min(100, 100 * Math.abs(v) / wp);   // Einspeisegrenzen kommen negativ zurueck
+  }
+  function ledZustand(r){
+    if(r.q === 'LPC'){
+      if(!istLim.lpc) return 'unknown';
+      return istLim.lpc.Aktiv ? 'on' : 'off';
+    }
+    if(r.q === 'LPP'){
+      var pct = einspeisungPct();
+      if(pct === null) return 'unknown';
+      if(pct >= 100) return 'off';
+      var stufen = ledRegeln.filter(function(x){ return x.q === 'LPP'; }).map(function(x){ return Number(x.s); });
+      var unter = stufen.filter(function(x){ return x <= pct + 0.5; });
+      var stufe = unter.length ? Math.max.apply(null, unter) : Math.min.apply(null, stufen);
+      return (Number(r.s) === stufe) ? 'on' : 'off';
+    }
+    return 'off';
+  }
+  function ledText(r){
+    if(r.q === 'LPC') return r.n + ': Bezugsgrenze aktiv';
+    if(r.q === 'LPP') return r.n + ': Einspeisung auf ' + r.s + ' % begrenzt';
+    return r.n + ': nicht belegt';
+  }
+  function ausgaengeZeigen(){
+    var h = '';
+    ledRegeln.forEach(function(r){
+      h += '<span class="ledi" title="' + ledText(r) + '"><span class="led ' + ledZustand(r) + '"></span>' + r.n + '</span>';
+    });
+    el('leds').innerHTML = h;
+    var braucht = ledRegeln.some(function(r){ return r.q === 'LPP'; });
+    el('led_pv').classList.toggle('hide', !(braucht && istLim.lpp && !pvWp()));
+    // Schnellwahl: den Knopf markieren, der dem bestaetigten Zustand entspricht
+    var c = istLim.lpc, cv = c ? num(c.Wert) : null;
+    el('q_lpc_on').classList.toggle('sel', !!(c && c.Aktiv && cv !== null && Math.abs(cv) === LPC_SCHNELL_W));
+    el('q_lpc_off').classList.toggle('sel', !!(c && !c.Aktiv));
+    var pct = einspeisungPct(), wp = pvWp();
+    document.querySelectorAll('.qpv').forEach(function(b){
+      var bp = Number(b.dataset.pct);
+      b.disabled = (bp < 100) && !wp;
+      b.title = b.disabled ? 'Erst die installierte PV-Leistung eintragen'
+              : (bp >= 100 ? 'Begrenzung aufheben' : 'Einspeisung auf ' + Math.round(wp * bp / 100).toLocaleString('de-DE') + ' W begrenzen');
+      b.classList.toggle('sel', pct !== null && Math.abs(pct - bp) < 0.5);
+    });
+  }
+  function ledCfgZeigen(){
+    var h = '';
+    ledRegeln.forEach(function(r, i){
+      h += '<b>' + r.n + '</b><select onchange="ledRegeln[' + i + '].q=this.value;ledSichern();ledCfgZeigen();ausgaengeZeigen()">' +
+           '<option value="LPP"' + (r.q === 'LPP' ? ' selected' : '') + '>Einspeisung begrenzt auf</option>' +
+           '<option value="LPC"' + (r.q === 'LPC' ? ' selected' : '') + '>Bezugsgrenze aktiv</option>' +
+           '<option value="off"' + (r.q === 'off' ? ' selected' : '') + '>nicht belegt</option></select>' +
+           (r.q === 'LPP' ? '<span><input type="number" min="0" max="100" value="' + r.s + '" ' +
+             'onchange="ledRegeln[' + i + '].s=Number(this.value);ledSichern();ausgaengeZeigen()"> %</span>' : '<span></span>');
+    });
+    el('led_cfg').innerHTML = h;
+  }
+
+  var FELDER = ['lpc_val','lpc_dur','lpp_val','lpp_dur','p_nenn','p_pct','pv_wp'];
   document.querySelectorAll('.zin').forEach(function(e){ if(e.id) FELDER.push(e.id); });
   FELDER.forEach(function(id){
     var e = el(id); if(!e) return;
@@ -1487,7 +1691,11 @@
   el('ownskibtn').textContent = skiHidden ? 'zeigen' : 'verbergen';
   ownIdentLaden();
   startAuswahl();
-  setInterval(function(){ if(!document.hidden) refresh(); }, 20000);
+  pairLaden();
+  ledCfgZeigen();
+  ausgaengeZeigen();
+  el('pv_wp').addEventListener('input', ausgaengeZeigen);
+  setInterval(function(){ if(!document.hidden){ refresh(); pairLaden(); } }, 20000);
 </script>
 </body>
 </html>
