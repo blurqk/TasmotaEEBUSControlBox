@@ -36,6 +36,9 @@
 
   Aktivierung in user_config_override.h:
     #define USE_EEBUS_GUARD
+    #define USE_MQTT_CLIENT_CERT   // Pflicht: sonst senden ausgehende Verbindungen KEIN Client-
+                                   // Zertifikat (die TLS-Bibliothek wird ohne gebaut), und
+                                   // Gegenstellen wie der Weidmueller ERC schliessen die Verbindung
 
   Kommandos — Verbindung:
     EEBusScan                     mDNS-Suche nach SHIP-Diensten (asynchron, ~1,5 s)
@@ -56,6 +59,13 @@
     EEBusPeerMode <ski> <art>     Betriebsart je Geraet: hems | steuve | del; ohne Arg = Liste
     EEBusAnmeld 0|1               nach dem Verbinden je eine Freigabe fuer Bezug und Einspeisung
                                   senden (kein Limit) — damit gilt die Steuerbox als verbunden
+    EEBusPair <QR-Text>           SHIP Pairing Service: bei einer Gegenstelle anmelden, die keine
+                                  SKI-Freigabe kennt (z.B. Weidmueller ERC). Der Text ihres
+                                  Pairing-QR-Codes (SHIP;SKI:..;ID:..;FPH256:..;SPSEC:..;ENDSHIP;)
+                                  wird gespeichert, die Ankuendigung laeuft bis 15 min nach dem
+                                  Verbinden. EEBusPair = Zustand, EEBusPair 0 = beenden und loeschen
+    EEBusShipId [<id>|0]          eigene SHIP-ID fest vorgeben (z.B. beim Uebernehmen der Identitaet
+                                  einer anderen Steuerbox samt Zertifikat); wirkt nach Neustart
 
   Kommandos — § 14a EnWG (Bezug):
     EEBusLpc <ziel> <watt> [s]    Bezugsgrenze setzen; ohne Dauer gilt die Vorgabe
@@ -145,6 +155,14 @@
 
 #define XDRV_126                126
 
+// Ohne USE_MQTT_CLIENT_CERT fehlt in der TLS-Bibliothek (tls_mini) br_ssl_client_set_single_ec:
+// setClientECCert() bleibt dann wirkungslos und AUSGEHENDE Verbindungen senden KEIN Client-
+// Zertifikat. Gegenstellen, die es verlangen (Weidmueller ERC, ship-go/eebus-go), schliessen die
+// Verbindung ohne Alarm — im Treiber erscheint nur "tls connect err=0".
+#ifndef USE_MQTT_CLIENT_CERT
+#warning "xdrv_126: USE_MQTT_CLIENT_CERT fehlt - ausgehende SHIP-Verbindungen senden kein Client-Zertifikat"
+#endif
+
 // WICHTIG (Heap-Korruptions-Fallebewiesen): xdrv_123_plugins.ino setzt
 // "#pragma pack(4)" und setzt es NIE zurueck. Da alle .ino zu EINER tasmota.ino.cpp
 // zusammengesetzt werden, wuerden alle hier inkludierten Header (BearSSL-Klasse,
@@ -168,6 +186,7 @@
 #include <mbedtls/base64.h>
 #include <SHA1Builder.h>   // Arduino-Core Hash-Lib — mbedtls_sha1 ist im Tasmota-mbedTLS wegkonfiguriert
 #include <t_bearssl.h>   // BearSSL br_sha1 (korrekte SHA1; SHA1Builder lieferte falsche Hashes)
+#include <esp_random.h>   // esp_fill_random: Nonce fuer den SHIP Pairing Service
 #include <NetworkServer.h> // eingehender TCP-Listener (ESP32-Core, funktioniert ueber WiFi + Ethernet)
 #include <NetworkClient.h>
 // TLS-Transport: Tasmotas mbedTLS hat KEINE SSL-Schicht (mbedtls_ssl_* fehlen komplett),
@@ -183,6 +202,7 @@
    // aus dem Scan liegt NUR im RAM — nach dem Hochfahren weiss das Geraet sonst nicht mehr,
    // mit wem es verbunden war, und ein Mensch muesste jedes Mal von Hand scannen und verbinden.
 #define EEBUS_PEER_FILE         "/eebus_peer.txt"
+#define EEBUS_SHIPID_FILE       "/eebus_shipid.txt"   // optionale feste SHIP-ID (EEBusShipId)
 #define EEBUS_CERT_DER_SIZE     1024
 #define EEBUS_KEY_DER_SIZE      256
 
@@ -190,8 +210,14 @@
 // "Verfuegbare Geraete" auftauchen). id/type/brand/model in den TXT-Records nach SHIP 7.3.2.
 #define EEBUS_ADV_PORT          4712
 #define EEBUS_ADV_TYPE          "ChargingStation"   // wir simulieren einen steuerbaren Verbraucher
+// Marke und Modell lassen sich per Build-Flag ueberschreiben (z.B. -DEEBUS_ADV_BRAND='"PPC"'),
+// um zu pruefen, ob eine Gegenstelle nach dem Hersteller der Steuerbox unterscheidet.
+#ifndef EEBUS_ADV_BRAND
 #define EEBUS_ADV_BRAND         "Tasmota"
+#endif
+#ifndef EEBUS_ADV_MODEL
 #define EEBUS_ADV_MODEL         "EEBusGuard"
+#endif
 // EINE Kennung = Brand-Model-Serial. Dieselbe Kennung dient als mDNS-id = accessMethods.id =
 // SPINE-deviceCode; eine Gegenstelle inventarisiert uns ueber deviceCode + serialNumber.
 //
@@ -221,7 +247,9 @@ extern FS *ufsp;   // aktives FS (SD-Karte wenn gemountet) — fuer den SHIP-Mit
 const char kEebusCommands[] PROGMEM = D_PRFX_EEBUS "|"   // Prefix
   "Scan|Peers|Cert|Connect|Disconnect|Status|Trust|ConnectIp|Advertise|Log|"
   "Role|Lpc|ReleaseAll|Release|Target|Probe|Provide|Open|Hems|PeerMode|DelDur|"
-  "LppFrei|Lpp|Anmeld|Data|Mess|Struct|Read|AutoConn";   // ReleaseAll VOR Release, LppFrei VOR Lpp (Praefix-Match!)
+  "LppFrei|Lpp|Anmeld|Data|Mess|Struct|Read|AutoConn|Pair|ShipId";   // ReleaseAll VOR Release, LppFrei VOR Lpp (Praefix-Match!)
+
+uint32_t EebusRetryMs(void);   // Abstand bis zum naechsten Verbindungsversuch (s. Pairing-Abschnitt)
 
 void (* const EebusCommand[])(void) PROGMEM = {
   &CmndEebusScan, &CmndEebusPeers, &CmndEebusCert,
@@ -231,7 +259,7 @@ void (* const EebusCommand[])(void) PROGMEM = {
   &CmndEebusTarget, &CmndEebusProbe, &CmndEebusProvide, &CmndEebusOpen, &CmndEebusHems,
   &CmndEebusPeerMode, &CmndEebusDelDur,
   &CmndEebusLppFrei, &CmndEebusLpp, &CmndEebusAnmeld, &CmndEebusData,
-  &CmndEebusMess, &CmndEebusStruct, &CmndEebusRead, &CmndEebusAutoConn };
+  &CmndEebusMess, &CmndEebusStruct, &CmndEebusRead, &CmndEebusAutoConn, &CmndEebusPair, &CmndEebusShipId };
 
 // Blind-Adressierung (Waermepumpen-Gateway liefert ihre Discovery nicht — VR940-Karte als Vorlage:
 // LoadControl/server auf entity 3 "HeatPumpAppliance"):
@@ -855,6 +883,43 @@ void EebusBuildIdent(void) {
   }
   snprintf_P(eebus_adv_id, sizeof(eebus_adv_id), PSTR("%s-%s-%s"),
              EEBUS_ADV_BRAND, EEBUS_ADV_MODEL, eebus_adv_serial);
+#ifdef USE_UFILESYS
+   // Ausdrueckliche SHIP-ID (EEBusShipId) hat Vorrang. Gebraucht, wenn das Geraet die Identitaet
+   // einer anderen Steuerbox uebernimmt (Zertifikat + SHIP-ID), der eine Gegenstelle schon vertraut.
+  if (TfsFileExists(EEBUS_SHIPID_FILE)) {
+    File f = ffsp->open(EEBUS_SHIPID_FILE, "r");
+    if (f) {
+      char id[sizeof(eebus_adv_id)];
+      int n = f.read((uint8_t*)id, sizeof(id) - 1);
+      f.close();
+      id[(n > 0) ? n : 0] = '\0';
+      while ((n > 0) && (('\n' == id[n - 1]) || ('\r' == id[n - 1]) || (' ' == id[n - 1]))) { id[--n] = '\0'; }
+      if (n > 0) { strlcpy(eebus_adv_id, id, sizeof(eebus_adv_id)); }
+    }
+  }
+#endif
+}
+
+// EEBusShipId              eigene SHIP-ID anzeigen
+// EEBusShipId <id>         SHIP-ID fest vorgeben (wirkt nach einem Neustart)
+// EEBusShipId 0            Vorgabe loeschen -> wieder aus Marke, Modell und SKI gebildet
+void CmndEebusShipId(void) {
+#ifdef USE_UFILESYS
+  if (XdrvMailbox.data_len > 0) {
+    if (0 == strcmp(XdrvMailbox.data, "0")) {
+      if (TfsFileExists(EEBUS_SHIPID_FILE)) { TfsDeleteFile(EEBUS_SHIPID_FILE); }
+    } else if (strlen(XdrvMailbox.data) < sizeof(eebus_adv_id)) {
+      TfsSaveFile(EEBUS_SHIPID_FILE, (const uint8_t*)XdrvMailbox.data, strlen(XdrvMailbox.data));
+    } else {
+      ResponseCmndChar_P(PSTR("SHIP-ID zu lang"));
+      return;
+    }
+  }
+  Response_P(PSTR("{\"%s\":{\"Aktiv\":\"%s\",\"Vorgabe\":%s,\"Hinweis\":\"Aenderungen wirken nach einem Neustart\"}}"),
+             XdrvMailbox.command, eebus_adv_id, TfsFileExists(EEBUS_SHIPID_FILE) ? "true" : "false");
+#else
+  ResponseCmndChar_P(PSTR("Kein Dateisystem"));
+#endif
 }
 
 bool EebusEnsureCert(bool force_new) {
@@ -975,7 +1040,12 @@ void EebusPollScan(void) {
         const char *k = cur->txt[i].key;
         const char *v = cur->txt[i].value;
         if ((nullptr == k) || (nullptr == v)) { continue; }
-        if (0 == strcmp(k, "ski"))        { strlcpy(p->ski, v, sizeof(p->ski)); }
+        if (0 == strcmp(k, "ski")) {
+   // klein schreiben: manche Geraete (Weidmueller ERC) melden die SKI in Grossbuchstaben, alle
+   // Vergleiche im Treiber laufen aber auf der kleingeschriebenen Form (wie die eigene SKI)
+          strlcpy(p->ski, v, sizeof(p->ski));
+          for (char *c = p->ski; *c; c++) { *c = (char)tolower((unsigned char)*c); }
+        }
         else if (0 == strcmp(k, "id"))    { strlcpy(p->id, v, sizeof(p->id)); }
         else if (0 == strcmp(k, "path"))  { strlcpy(p->path, v, sizeof(p->path)); }
         else if (0 == strcmp(k, "model")) { strlcpy(p->model, v, sizeof(p->model)); }
@@ -989,20 +1059,37 @@ void EebusPollScan(void) {
       }
       if (cur->hostname) { strlcpy(p->host, cur->hostname, sizeof(p->host)); }
       p->port = cur->port;
-      for (mdns_ip_addr_t *a = cur->addr; a; a = a->next) {   // erste IPv4 reicht
-        if (ESP_IPADDR_TYPE_V4 == a->addr.type) {
-          strlcpy(p->ip, IPAddress(a->addr.u_addr.ip4.addr).toString().c_str(), sizeof(p->ip));
-          break;
-        }
+   // erste IPv4 — aber eine link-lokale (169.254.x.x) nur, wenn es keine andere gibt. Der
+   // Weidmueller ERC meldet zusaetzlich eine solche Adresse; ueber sie laeuft ein Verbindungsversuch
+   // ins Leere (am Referenz-Werkzeug beobachtet: erst Zeitueberschreitung, dann die zweite Adresse).
+      for (mdns_ip_addr_t *a = cur->addr; a; a = a->next) {
+        if (ESP_IPADDR_TYPE_V4 != a->addr.type) { continue; }
+        IPAddress ip4(a->addr.u_addr.ip4.addr);
+        bool link_local = (169 == ip4[0]) && (254 == ip4[1]);
+        if (link_local && p->ip[0]) { continue; }
+        strlcpy(p->ip, ip4.toString().c_str(), sizeof(p->ip));
+        if (!link_local) { break; }
       }
    // SKI ist die Identitaet — ohne SKI ist der Eintrag fuer uns wertlos (SHIP 7.3.2 Pflichtfeld)
       if ('\0' == p->ski[0]) { continue; }
    // Dedup nach SKI. mDNS liefert denselben Dienst mitunter MEHRFACH (mehrere Interfaces/
    // Adressen — z.B. der Referenz-CS an 169.254 doppelt). Jedes Geraet soll genau einmal in der
    // Liste stehen (SKI = Identitaet), sonst ist die Geraeteauswahl uneindeutig.
+   // Ein Geraet kann sich in getrennten Antworten melden, eine davon nur mit IPv6 (Weidmueller ERC).
+   // Steht der erste Eintrag ohne IPv4 da, die Adresse aus dem Duplikat uebernehmen — sonst bleibt
+   // das Geraet unerreichbar, obwohl seine IPv4 bekannt ist.
       bool dup = false;
       for (uint32_t d = 0; d < Eebus.peer_count; d++) {
-        if (0 == strcmp(Eebus.peers[d].ski, p->ski)) { dup = true; break; }
+        if (0 == strcmp(Eebus.peers[d].ski, p->ski)) {
+          dup = true;
+          bool d_ll = (0 == strncmp(Eebus.peers[d].ip, "169.254.", 8));
+          bool p_ll = (0 == strncmp(p->ip, "169.254.", 8));
+          if (p->ip[0] && (!Eebus.peers[d].ip[0] || (d_ll && !p_ll))) {
+            strlcpy(Eebus.peers[d].ip, p->ip, sizeof(Eebus.peers[d].ip));
+            if (p->port) { Eebus.peers[d].port = p->port; }
+          }
+          break;
+        }
       }
       if (dup) { continue; }
       Eebus.peer_count++;
@@ -1284,6 +1371,9 @@ typedef struct {
   int      pnom_prod_ent = -1;   // aus welcher Entity kam die Nennleistung Erzeugung?
    // Ist-Zustand beider Grenzen des Peers (0 = consume/§14a, 1 = produce/§9)
   int8_t   lim_act[2] = { -1, -1 }; // -1 unbekannt, 0 inaktiv, 1 aktiv
+   // limitId je Richtung aus der LoadControl-Beschreibung (-1 = nicht gelernt). Bisher wurde
+   // limitId 0 als Bezug und 1 als Einspeisung angenommen; das gilt nicht bei jeder Gegenstelle.
+  int      lim_id[2]  = { -1, -1 };
   long     lim_val[2] = { 0, 0 };
   int8_t   lim_sc[2]  = { 0, 0 };
    // die vom Peer ZURUECKGEMELDETE Geltungsdauer je Grenze (aus dem Read-Back). Damit laesst
@@ -1719,6 +1809,7 @@ bool EebusShipConnect(int idx) {
   ESp->lpc_bound = false;
   ESp->lpc_onboard_only = false;   // 
   ESp->lpc_onboarded = false;   // 
+  ESp->lim_id[0] = -1; ESp->lim_id[1] = -1;
   ESp->lpc_limit_id = -1;
   ESp->lpc_peer_ent = 1; ESp->lpc_peer_feat = 6; ESp->lpc_peer_dcfg_feat = 24;   // Ladestation-Default; /wird aus der Peer-Discovery
    // gelernt (EebusLpcLearnTarget), sobald sie eintrifft
@@ -1796,7 +1887,13 @@ bool EebusShipConnect(int idx) {
    // NIE ein IP-Literal als SNI setzen — mbedtls-Gegenstellen lehnen das mit err=296 ab.
   {
     IPAddress peer_addr;
-    if (!peer_addr.fromString(p->ip) || !ESp->client->connect(peer_addr, p->port)) {
+   // Ohne IPv4 (mDNS lieferte nur IPv6) gar nicht erst verbinden: getLastError() greift ohne
+   // TLS-Kontext auf einen Nullzeiger zu — das fuehrte zu einem Absturz mit Neustartschleife.
+    if (!peer_addr.fromString(p->ip)) {
+      strlcpy(ESp->err, "keine IPv4-Adresse", sizeof(ESp->err));
+      goto fail;
+    }
+    if (!ESp->client->connect(peer_addr, p->port)) {
       snprintf(ESp->err, sizeof(ESp->err), "tls connect err=%d", (int)ESp->client->getLastError());
       goto fail;
     }
@@ -3453,6 +3550,42 @@ bool EebusJsonLong(const char *s, const char *key, long *out) {
   return true;
 }
 
+// scaledNumber {number, scale} lesen, ohne dass grosse Werte ueberlaufen. long ist auf dem ESP32 nur
+// 32 Bit und der Zehnerexponent wird als int8_t gefuehrt. Manche Gegenstellen (Weidmueller ERC)
+// melden "keine Grenze" mit einer Zahl, die beides sprengt; die Referenz-Umsetzung rechnet daraus
+// +Inf. Hier wird die Mantisse so lange gekuerzt, bis sie passt, und der Exponent bei 127 gedeckelt
+// — die Anzeige erkennt einen so grossen Wert als "unbegrenzt".
+void EebusScaledRead(const char *vp, long *num, int8_t *sc) {
+  long long n = 0; long e = 0;
+  const char *np = strstr(vp, "\"number\":");
+  const char *ep = strstr(vp, "\"scale\":");
+  const char *close = strchr(vp, '}');
+  if (np && (!close || (np < close))) { n = strtoll(np + 9, nullptr, 10); }
+  if (ep && (!close || (ep < close))) { e = strtol(ep + 8, nullptr, 10); }
+  while ((n > 2000000000LL) || (n < -2000000000LL)) { n /= 10; e++; }
+  if (e > 127)  { e = 127; }
+  if (e < -127) { e = -127; }
+  *num = (long)n;
+  *sc  = (int8_t)e;
+}
+
+// limitId einer Grenze mit ausdruecklich genannter Richtung (consume/produce) aus der
+// LoadControl-Beschreibung holen. Anders als EebusLpcPickLimitId OHNE Rueckfall auf die erste
+// Kennung — hier geht es um die ANZEIGE, und eine geratene Zuordnung zeigte die falsche Grenze.
+bool EebusLimitIdForDir(const char *desc, uint8_t dir, int *out_id) {
+  const char *best = strstr(desc, (1 == dir) ? "\"limitDirection\":\"produce\"" : "\"limitDirection\":\"consume\"");
+  if (nullptr == best) { return false; }
+  const char *p = desc, *last = nullptr;
+  while (true) {
+    const char *li = strstr(p, "\"limitId\":");
+    if ((nullptr == li) || (li > best)) { break; }
+    last = li; p = li + 10;
+  }
+  uint32_t id = 0;
+  if (last && EebusJsonInt(last, "limitId", &id)) { *out_id = (int)id; return true; }
+  return false;
+}
+
 // Nutzdaten aus einem eingehenden Datagramm mitlesen und im Slot behalten.
 // Wird fuer JEDES Datagramm aufgerufen und greift nur, wenn der jeweilige Block enthalten ist —
 // kein Eingriff in die Schreib-Zustandsmaschine, kein zusaetzlicher Netzverkehr.
@@ -3651,17 +3784,23 @@ void EebusHarvest(const char *json, int src_ent) {
           if ((2 == code) && dp && (!nx || (dp < nx))) {
             EebusJsonStr(dp, "duration", ESp->fs_dur, sizeof(ESp->fs_dur));
           } else if (vp && (!nx || (vp < nx))) {
-            long num = 0, sca = 0;
-            EebusJsonLong(vp, "number", &num);
-            EebusJsonLong(vp, "scale",  &sca);
-            if      (1 == code) { ESp->fs_cons = num; ESp->fs_cons_sc = (int8_t)sca; ESp->fs_cons_ok = true; }
-            else if (3 == code) { ESp->fs_prod = num; ESp->fs_prod_sc = (int8_t)sca; ESp->fs_prod_ok = true; }
-            else if (4 == code) { ESp->plf     = num; ESp->plf_sc     = (int8_t)sca; ESp->plf_ok     = true; }
+            long num = 0; int8_t sca = 0;
+            EebusScaledRead(vp, &num, &sca);
+            if      (1 == code) { ESp->fs_cons = num; ESp->fs_cons_sc = sca; ESp->fs_cons_ok = true; }
+            else if (3 == code) { ESp->fs_prod = num; ESp->fs_prod_sc = sca; ESp->fs_prod_ok = true; }
+            else if (4 == code) { ESp->plf     = num; ESp->plf_sc     = sca; ESp->plf_ok     = true; }
           }
         }
         q += 8;
       }
     }
+  }
+
+   // --- Kennungen der beiden Grenzen aus der Beschreibung lernen --------------------------------
+  if (nullptr != strstr(json, "\"loadControlLimitDescriptionListData\"")) {
+    int lidd;
+    if (EebusLimitIdForDir(json, 0, &lidd)) { ESp->lim_id[0] = lidd; }
+    if (EebusLimitIdForDir(json, 1, &lidd)) { ESp->lim_id[1] = lidd; }
   }
 
    // --- Ist-Zustand der beiden Grenzen des Peers ----------------------------------------------
@@ -3671,10 +3810,19 @@ void EebusHarvest(const char *json, int src_ent) {
       uint32_t lid = 0;
       EebusJsonInt(q, "limitId", &lid);
       nx = strstr(q + 10, "\"limitId\":");
-      if (lid < 2) {
+   // Richtung der Grenze: aus der gelernten Beschreibung; ohne Beschreibung wie bisher
+   // limitId 0 = Bezug, 1 = Einspeisung.
+      int d = -1;
+      if ((ESp->lim_id[0] >= 0) || (ESp->lim_id[1] >= 0)) {
+        if      ((int)lid == ESp->lim_id[0]) { d = 0; }
+        else if ((int)lid == ESp->lim_id[1]) { d = 1; }
+      } else if (lid < 2) {
+        d = (int)lid;
+      }
+      if (d >= 0) {
         const char *ap = strstr(q, "\"isLimitActive\":");
         if (ap && (!nx || (ap < nx))) {
-          ESp->lim_act[lid] = (0 == strncmp(ap + 16, "true", 4)) ? 1 : 0;
+          ESp->lim_act[d] = (0 == strncmp(ap + 16, "true", 4)) ? 1 : 0;
    // VERSPAETETE BESTAETIGUNG. Der Read-Back pollt nur wenige Sekunden nach; antwortet
    // die Gegenstelle spaeter (oder meldet sie den Zustand von sich aus per notify), stand das
    // Ergebnis frueher fuer immer auf "Fehler" — obwohl die Begrenzung laengst wirkte. Genau
@@ -3682,7 +3830,7 @@ void EebusHarvest(const char *json, int src_ent) {
    // Ruecklesung kam (lpc_verify_failed) — eine echte Ablehnung der Gegenstelle bleibt stehen.
           if (ESp->lpc_verify_failed && (LPC_FAIL == ESp->lpc_state) &&
               ((int)lid == ESp->lpc_limit_id) &&
-              ((1 == ESp->lim_act[lid]) == ESp->lpc_active_wish)) {
+              ((1 == ESp->lim_act[d]) == ESp->lpc_active_wish)) {
             ESp->lpc_verify_failed = false;
             ESp->lpc_our_limit = ESp->lpc_active_wish;
             char t[56];
@@ -3694,24 +3842,20 @@ void EebusHarvest(const char *json, int src_ent) {
         }
         const char *vp = strstr(q, "\"value\":[{\"number\":");
         if (vp && (!nx || (vp < nx))) {
-          long num = 0, sca = 0;
-          EebusJsonLong(vp, "number", &num);
-          EebusJsonLong(vp, "scale",  &sca);
-          ESp->lim_val[lid] = num;
-          ESp->lim_sc[lid]  = (int8_t)sca;
+          EebusScaledRead(vp, &ESp->lim_val[d], &ESp->lim_sc[d]);
         }
    // Geltungsdauer mitlesen. Steht KEINE im Eintrag, wird der gemerkte Wert geloescht —
    // sonst zeigte die Anzeige noch eine Dauer, die der Peer laengst nicht mehr fuehrt.
         const char *ep = strstr(q, "\"endTime\":\"");
         if (ep && (!nx || (ep < nx))) {
-          EebusJsonStr(ep, "endTime", ESp->lim_dur[lid], sizeof(ESp->lim_dur[lid]));
+          EebusJsonStr(ep, "endTime", ESp->lim_dur[d], sizeof(ESp->lim_dur[d]));
    // Restlaufzeit in Sekunden merken + Empfangszeitpunkt stempeln -> die Anzeige
    // rechnet ab hier selbst weiter, statt den Text einzufrieren. Laesst sich die Dauer nicht
    // deuten (unbekannte Schreibweise), bleibt -1 und wir zeigen weiter den Rohtext.
-          ESp->lim_dur_s[lid]  = EebusIsoDurSecs(ESp->lim_dur[lid]);
-          ESp->lim_dur_at[lid] = millis();
+          ESp->lim_dur_s[d]  = EebusIsoDurSecs(ESp->lim_dur[d]);
+          ESp->lim_dur_at[d] = millis();
         } else {
-          ESp->lim_dur[lid][0] = '\0';
+          ESp->lim_dur[d][0] = '\0';
         }
       }
       q += 10;
@@ -4069,7 +4213,7 @@ void EebusSmeDispatch(const uint8_t *rx, int n) {
       ESp->sme = SME_OFF;
       ESp->state = SHIP_IDLE;
       if (ESp->keepalive && (ESp->peer_idx >= 0)) {   // Keep-Alive: nach kurzem Warten neu verbinden
-        ESp->reconnect_at = millis() + (ESp->sme_pending_logged ? EEBUS_PENDING_RETRY_MS : EEBUS_SPINE_KEEPALIVE_MS);
+        ESp->reconnect_at = millis() + EebusRetryMs();
       }
       EebusTeardownLater();   // Client verzoegert freigeben
     } else {   // Close VOR Done = abgewiesen
@@ -4195,7 +4339,7 @@ void EebusSmePoll(void) {
       ESp->sme = SME_OFF;
       ESp->state = SHIP_IDLE;
       if (ESp->keepalive && (ESp->peer_idx >= 0)) {   // Keep-Alive: bald neu verbinden
-        ESp->reconnect_at = millis() + (ESp->sme_pending_logged ? EEBUS_PENDING_RETRY_MS : EEBUS_SPINE_KEEPALIVE_MS);
+        ESp->reconnect_at = millis() + EebusRetryMs();
       }
       EebusTeardownLater();   // Client verzoegert freigeben
     } else {
@@ -4419,6 +4563,318 @@ void CmndEebusAutoConn(void) {
   Response_P(PSTR("{\"%s\":{\"WarteS\":%u,\"Peer\":\"%s\",\"Zustand\":\"%s\",\"Versuche\":%u}}"),
              XdrvMailbox.command, eebus_ac_delay_s,
              eebus_ac_ski[0] ? eebus_ac_ski : "-", zst, eebus_ac_try);
+}
+
+/*********************************************************************************************\
+ * SHIP Pairing Service — wir als Ankuendiger ("devZ", hinzuzufuegende Steuereinheit)
+ *
+ * Manche Gegenstellen bieten KEINE SKI-Freigabe an (Weidmueller EEBUS Relais Converter, ERC).
+ * Sie vertrauen einer Steuerbox nur ueber den SHIP Pairing Service: auf dem Geraet steht ein
+ * QR-Code mit SKI, SHIP-ID, Zertifikats-Fingerprint und einem 16-Byte-Geheimnis (SPSEC). Die
+ * Steuerbox kuendigt sich damit per mDNS als _shippairing._tcp an; die TXT-Eintraege tragen einen
+ * HMAC-SHA256 ueber die Ankuendigung, Schluessel = Geheimnis || Nonce. Stimmt der HMAC, nimmt die
+ * Gegenstelle unsere SHIP-ID und unseren Fingerprint selbsttaetig in ihre Vertrauensliste auf.
+ * Danach ist es eine gewoehnliche SHIP-Verbindung.
+ *
+ * Aufbau und Feldreihenfolge wie in der Referenz-Umsetzung (ship-go, pairing/hmac.go und
+ * pairing/hub_integration.go). Die Ankuendigung bleibt stehen, bis eine Verbindung zum Ziel
+ * 15 Minuten ununterbrochen bestanden hat (dort: AnnouncementLifetimeTimeout).
+ *
+ * ⚠️ mDNS reicht nicht ueber Netzgrenzen: Steuerbox und Gegenstelle muessen im selben Netz liegen.
+\*********************************************************************************************/
+#define EEBUS_PAIR_FILE      "/eebus_pair.txt"
+#define EEBUS_PAIR_QR_MAX    384
+#define EEBUS_PAIR_HOLD_MS   (15UL * 60UL * 1000UL)   // Ankuendigung nach 15 min stabiler Verbindung entfernen
+#define EEBUS_PAIR_CONN_S    20   // so lange nach der Ankuendigung warten, bevor wir selbst verbinden
+
+struct {
+  bool     loaded = false;     // Datei seit dem Start gelesen?
+  bool     have = false;       // gueltiges Ziel vorhanden
+  bool     announced = false;  // _shippairing._tcp angekuendigt?
+  bool     done = false;       // lange genug verbunden -> Ankuendigung entfernt
+  uint32_t conn_since = 0;     // millis() seit der Datenphase mit dem Ziel (0 = nicht verbunden)
+  char     ski[41] = { 0 };    // SKI des Ziels, klein geschrieben
+  char     id[64] = { 0 };     // SHIP-ID des Ziels (forId)
+  char     fp[65] = { 0 };     // Fingerprint des Ziels, SHA-256 gross (forPar)
+  uint8_t  secret[16] = { 0 }; // SPSEC
+  char     brand[25] = { 0 };
+  char     model[33] = { 0 };
+   // zuletzt angekuendigt — oeffentlich (steht so in der mDNS-Ankuendigung), zur Nachpruefung
+  char     own_fp[65] = { 0 };
+  char     nonce[33] = { 0 };
+  char     digest[65] = { 0 };
+} EebusPair;
+
+void EebusHexUpper(const uint8_t *in, size_t n, char *out) {
+  static const char kHex[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < n; i++) {
+    out[i * 2]     = kHex[in[i] >> 4];
+    out[i * 2 + 1] = kHex[in[i] & 0x0F];
+  }
+  out[n * 2] = '\0';
+}
+
+// Hex-Ziffern aus v[0..vl) einsammeln (Leerzeichen dazwischen ueberspringen, wie im QR-Code des
+// ERC: "3976 5FF1 ..."). upper: gross statt klein. Rueckgabe: Anzahl Ziffern, -1 bei Fremdzeichen.
+int EebusHexCollect(const char *v, size_t vl, char *out, size_t outlen, bool upper) {
+  size_t o = 0;
+  for (size_t i = 0; i < vl; i++) {
+    char c = v[i];
+    if (' ' == c) { continue; }
+    if (!isxdigit((unsigned char)c)) { return -1; }
+    if (o + 1 >= outlen) { return -1; }
+    out[o++] = upper ? (char)toupper((unsigned char)c) : (char)tolower((unsigned char)c);
+  }
+  out[o] = '\0';
+  return (int)o;
+}
+
+// QR-Text "SHIP;SKI:..;ID:..;BRAND:..;...;FPH256:..;SPSEC:..;ENDSHIP;" einlesen.
+// Erst bei vollstaendigem, gueltigem Inhalt wird das Ziel uebernommen.
+bool EebusPairParse(const char *qr) {
+  if (nullptr == qr) { return false; }
+  while (' ' == *qr) { qr++; }
+  if ((0 != strncmp(qr, "SHIP;", 5)) || (nullptr == strstr(qr, "ENDSHIP;"))) { return false; }
+
+  char ski[41] = { 0 }, id[64] = { 0 }, fp[65] = { 0 }, brand[25] = { 0 }, model[33] = { 0 };
+  char sec_hex[33] = { 0 };
+  const char *p = qr + 5;
+  while (*p && (0 != strncmp(p, "ENDSHIP;", 8))) {
+    const char *end = strchr(p, ';');
+    if (nullptr == end) { break; }
+    const char *colon = (const char*)memchr(p, ':', end - p);
+    if (colon) {
+      size_t kl = colon - p;
+      const char *v = colon + 1;
+      size_t vl = end - v;
+      if      ((3 == kl) && (0 == strncmp(p, "SKI", 3)))    { if (EebusHexCollect(v, vl, ski, sizeof(ski), false) < 0) { return false; } }
+      else if ((6 == kl) && (0 == strncmp(p, "FPH256", 6))) { if (EebusHexCollect(v, vl, fp, sizeof(fp), true) < 0) { return false; } }
+      else if ((5 == kl) && (0 == strncmp(p, "SPSEC", 5)))  { if (EebusHexCollect(v, vl, sec_hex, sizeof(sec_hex), false) < 0) { return false; } }
+      else if ((2 == kl) && (0 == strncmp(p, "ID", 2)))     { strlcpy(id, v, (vl + 1 < sizeof(id)) ? vl + 1 : sizeof(id)); }
+      else if ((5 == kl) && (0 == strncmp(p, "BRAND", 5)))  { strlcpy(brand, v, (vl + 1 < sizeof(brand)) ? vl + 1 : sizeof(brand)); }
+      else if ((5 == kl) && (0 == strncmp(p, "MODEL", 5)))  { strlcpy(model, v, (vl + 1 < sizeof(model)) ? vl + 1 : sizeof(model)); }
+    }
+    p = end + 1;
+  }
+  if ((40 != strlen(ski)) || (64 != strlen(fp)) || (32 != strlen(sec_hex)) || ('\0' == id[0])) { return false; }
+
+  EebusPair.have = true;
+  strlcpy(EebusPair.ski, ski, sizeof(EebusPair.ski));
+  strlcpy(EebusPair.id, id, sizeof(EebusPair.id));
+  strlcpy(EebusPair.fp, fp, sizeof(EebusPair.fp));
+  strlcpy(EebusPair.brand, brand, sizeof(EebusPair.brand));
+  strlcpy(EebusPair.model, model, sizeof(EebusPair.model));
+  for (int i = 0; i < 16; i++) {
+    char b[3] = { sec_hex[i * 2], sec_hex[i * 2 + 1], 0 };
+    EebusPair.secret[i] = (uint8_t)strtoul(b, nullptr, 16);
+  }
+  return true;
+}
+
+// Fingerprint des eigenen Zertifikats: SHA-256 ueber das DER, gross geschrieben (SHIP 6.2).
+bool EebusOwnFingerprint(char *out65) {
+#ifdef USE_UFILESYS
+  uint8_t *der = (uint8_t*)malloc(EEBUS_CERT_DER_SIZE);
+  if (nullptr == der) { return false; }
+  size_t n = EebusLoadDer(EEBUS_CERT_FILE, der, EEBUS_CERT_DER_SIZE);
+  if (0 == n) { free(der); return false; }
+  uint8_t hash[32];
+  br_sha256_context sc;
+  br_sha256_init(&sc);
+  br_sha256_update(&sc, der, n);
+  br_sha256_out(&sc, hash);
+  free(der);
+  EebusHexUpper(hash, sizeof(hash), out65);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool EebusPairAnnounce(void) {
+  if (!EebusPair.have) { return false; }
+  if (!EebusMdnsBegin()) { return false; }
+  if (!Eebus.cert_ok && !EebusEnsureCert(false)) { return false; }
+
+  char own_fp[65];
+  if (!EebusOwnFingerprint(own_fp)) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("EBG: Pairing - eigener Fingerprint nicht lesbar"));
+    return false;
+  }
+  uint8_t nonce[16];
+  esp_fill_random(nonce, sizeof(nonce));
+  char nonce_hex[33];
+  EebusHexUpper(nonce, sizeof(nonce), nonce_hex);
+
+   // HMAC-SHA256: Schluessel = Geheimnis || Nonce (roh), Nachricht = die TXT-Felder in fester
+   // Reihenfolge, jedes mit ";" abgeschlossen — ohne das Feld "digest" selbst.
+  char msg[400];
+  snprintf_P(msg, sizeof(msg),
+    PSTR("txtvers=1;parType=fpSha256;forId=%s;forPar=%s;trustId=%s;trustPar=%s;"
+         "trustCurve=secp256r1;type=addCu;trustNonce=%s;alg=hmacSha256;"),
+    EebusPair.id, EebusPair.fp, eebus_adv_id, own_fp, nonce_hex);
+  uint8_t key[32];
+  memcpy(key, EebusPair.secret, 16);
+  memcpy(key + 16, nonce, 16);
+  br_hmac_key_context kc;
+  br_hmac_context hc;
+  br_hmac_key_init(&kc, &br_sha256_vtable, key, sizeof(key));
+  br_hmac_init(&hc, &kc, 0);
+  br_hmac_update(&hc, msg, strlen(msg));
+  uint8_t digest[32];
+  br_hmac_out(&hc, digest);
+  memset(key, 0, sizeof(key));
+  char digest_hex[65];
+  EebusHexUpper(digest, sizeof(digest), digest_hex);
+
+  mdns_txt_item_t txt[] = {
+    { (char*)"txtvers",    (char*)"1" },
+    { (char*)"parType",    (char*)"fpSha256" },
+    { (char*)"forId",      EebusPair.id },
+    { (char*)"forPar",     EebusPair.fp },
+    { (char*)"trustId",    eebus_adv_id },
+    { (char*)"trustPar",   own_fp },
+    { (char*)"trustCurve", (char*)"secp256r1" },
+    { (char*)"type",       (char*)"addCu" },
+    { (char*)"trustNonce", nonce_hex },
+    { (char*)"alg",        (char*)"hmacSha256" },
+    { (char*)"digest",     digest_hex },
+  };
+  char inst[64];
+  snprintf_P(inst, sizeof(inst), PSTR("%s-pairing#1"), eebus_adv_id);
+  mdns_service_remove("_shippairing", "_tcp");   // evtl. alte Ankuendigung ersetzen (neue Nonce)
+  esp_err_t err = mdns_service_add(inst, "_shippairing", "_tcp", EEBUS_ADV_PORT,
+                                   txt, sizeof(txt) / sizeof(txt[0]));
+  if (ESP_OK != err) {
+    AddLog(LOG_LEVEL_ERROR, PSTR("EBG: Pairing-Ankuendigung Fehler %d"), err);
+    return false;
+  }
+  EebusPair.announced = true;
+  strlcpy(EebusPair.own_fp, own_fp, sizeof(EebusPair.own_fp));
+  strlcpy(EebusPair.nonce, nonce_hex, sizeof(EebusPair.nonce));
+  strlcpy(EebusPair.digest, digest_hex, sizeof(EebusPair.digest));
+  AddLog(LOG_LEVEL_INFO, PSTR("EBG: Pairing - angekuendigt fuer %s (SKI %s), eigener Fingerprint %s"),
+         EebusPair.id, EebusPair.ski, own_fp);
+  return true;
+}
+
+void EebusPairStop(void) {
+  if (!EebusPair.announced) { return; }
+  mdns_service_remove("_shippairing", "_tcp");
+  EebusPair.announced = false;
+  AddLog(LOG_LEVEL_INFO, PSTR("EBG: Pairing-Ankuendigung entfernt"));
+}
+
+// Nach der Ankuendigung selbst verbinden: das Ziel als Peer merken und den Wiederaufbau anstossen.
+// Er sucht per mDNS und versucht es mit wachsenden Abstaenden erneut — die Gegenstelle braucht
+// etwas, bis sie die Ankuendigung geprueft und uns aufgenommen hat.
+void EebusPairConnectSoon(void) {
+  EebusPeerRemember(EebusPair.ski);
+  if (0 == eebus_ac_delay_s) { return; }   // Wiederaufbau ausdruecklich abgeschaltet
+  eebus_ac_try = 0;
+  if (RtcTime.valid) {
+    eebus_ac_next  = millis() + (EEBUS_PAIR_CONN_S * 1000UL);
+    eebus_ac_state = AC_WAIT;
+  } else {
+    eebus_ac_state = AC_IDLE;   // wartet auf die Uhr (Herzschlag braucht einen gueltigen Zeitstempel)
+  }
+}
+
+// Abstand bis zum naechsten Verbindungsversuch des aktuellen Slots. Solange das Pairing-Ziel uns
+// noch nie angenommen hat, 30 s statt 8 s: jeder Versuch blockiert das Geraet fuer rund eine
+// Sekunde (TLS-Handshake im Hauptprogramm), und die Gegenstelle braucht ohnehin ihre Zeit.
+uint32_t EebusRetryMs(void) {
+  if (ESp->sme_pending_logged) { return EEBUS_PENDING_RETRY_MS; }
+  if (EebusPair.have && !EebusPair.done && !EebusPair.conn_since &&
+      (0 == strcasecmp(ESp->peer_ski, EebusPair.ski))) { return 30000UL; }
+  return EEBUS_SPINE_KEEPALIVE_MS;
+}
+
+bool EebusPairConnected(void) {
+  for (int i = 0; i < EEBUS_MAX_CONN; i++) {
+    EebusConn *cc = &EConn[i];
+    if (!cc->active || (SME_DONE != cc->sme)) { continue; }
+    if ((0 == strcasecmp(cc->peer_ski, EebusPair.ski)) ||
+        (cc->peer_id[0] && (0 == strcmp(cc->peer_id, EebusPair.id)))) { return true; }
+  }
+  return false;
+}
+
+void EebusPairLoad(void) {
+#ifdef USE_UFILESYS
+  if (!TfsFileExists(EEBUS_PAIR_FILE)) { return; }
+  File f = ffsp->open(EEBUS_PAIR_FILE, "r");
+  if (!f) { return; }
+  char qr[EEBUS_PAIR_QR_MAX + 1];
+  int n = f.read((uint8_t*)qr, EEBUS_PAIR_QR_MAX);
+  f.close();
+  qr[(n > 0) ? n : 0] = '\0';
+  if (EebusPairParse(qr)) {
+    AddLog(LOG_LEVEL_INFO, PSTR("EBG: Pairing-Ziel %s geladen"), EebusPair.id);
+  }
+#endif
+}
+
+// im Sekundentakt: Ankuendigung aufnehmen, sobald unsere _ship-Ankuendigung steht (Netz da),
+// und nach 15 Minuten stabiler Verbindung wieder entfernen.
+void EebusPairRun(void) {
+  if (!EebusPair.loaded) {
+    EebusPair.loaded = true;
+    EebusPairLoad();
+  }
+  if (!EebusPair.have || EebusPair.done) { return; }
+  if (!Eebus.advertised) { return; }
+  bool conn = EebusPairConnected();
+  if (!EebusPair.announced) {
+    if (EebusPairAnnounce() && !conn) { EebusPairConnectSoon(); }
+    return;
+  }
+  if (!conn) { EebusPair.conn_since = 0; return; }
+  if (0 == EebusPair.conn_since) { EebusPair.conn_since = millis() | 1; return; }
+  if (TimeReached(EebusPair.conn_since + EEBUS_PAIR_HOLD_MS)) {
+    EebusPairStop();
+    EebusPair.done = true;
+    AddLog(LOG_LEVEL_INFO, PSTR("EBG: Pairing mit %s abgeschlossen (15 min verbunden)"), EebusPair.id);
+  }
+}
+
+// EEBusPair              Zustand
+// EEBusPair <QR-Text>    Ziel aus dem Pairing-QR-Code der Gegenstelle setzen, speichern, ankuendigen
+// EEBusPair 0            Ankuendigung beenden und das gespeicherte Ziel loeschen
+void CmndEebusPair(void) {
+  if (!EebusPair.loaded) { EebusPair.loaded = true; EebusPairLoad(); }
+  if (XdrvMailbox.data_len > 0) {
+    if (0 == strcmp(XdrvMailbox.data, "0")) {
+      EebusPairStop();
+      EebusPair.have = false;
+      EebusPair.done = false;
+#ifdef USE_UFILESYS
+      if (TfsFileExists(EEBUS_PAIR_FILE)) { TfsDeleteFile(EEBUS_PAIR_FILE); }
+#endif
+    } else {
+      if (strlen(XdrvMailbox.data) > EEBUS_PAIR_QR_MAX) { ResponseCmndChar_P(PSTR("QR-Text zu lang")); return; }
+      if (!EebusPairParse(XdrvMailbox.data)) {
+        ResponseCmndChar_P(PSTR("QR-Text ungueltig - erwartet SHIP;SKI:..;ID:..;FPH256:..;SPSEC:..;ENDSHIP;"));
+        return;
+      }
+#ifdef USE_UFILESYS
+      TfsSaveFile(EEBUS_PAIR_FILE, (const uint8_t*)XdrvMailbox.data, strlen(XdrvMailbox.data));
+#endif
+      EebusPairStop();
+      EebusPair.done = false;
+      EebusPair.conn_since = 0;
+      if (Eebus.advertised && EebusPairAnnounce()) { EebusPairConnectSoon(); }
+    }
+  }
+  uint32_t verb_s = EebusPair.conn_since ? (millis() - EebusPair.conn_since) / 1000UL : 0;
+  Response_P(PSTR("{\"%s\":{\"Ziel\":\"%s\",\"Id\":\"%s\",\"Marke\":\"%s\",\"Modell\":\"%s\","
+                  "\"Angekuendigt\":%s,\"Abgeschlossen\":%s,\"Verbunden\":%s,\"VerbundenS\":%u,"
+                  "\"Txt\":{\"forPar\":\"%s\",\"trustId\":\"%s\",\"trustPar\":\"%s\",\"trustNonce\":\"%s\",\"digest\":\"%s\"}}}"),
+             XdrvMailbox.command, EebusPair.have ? EebusPair.ski : "", EebusPair.have ? EebusPair.id : "",
+             EebusPair.brand, EebusPair.model,
+             EebusPair.announced ? "true" : "false", EebusPair.done ? "true" : "false",
+             (EebusPair.have && EebusPairConnected()) ? "true" : "false", verb_s,
+             EebusPair.fp, eebus_adv_id, EebusPair.own_fp, EebusPair.nonce, EebusPair.digest);
 }
 
 void CmndEebusConnect(void) {
@@ -5410,7 +5866,16 @@ void EebusWebSensor(void) {
 // die Karte fehlt. Aktualisieren geht per Upload derselben Datei, ohne neu zu flashen.
 const char EEBUS_UI_FILE[] = "/steuerbox.html";
 void EebusWebPage(void) {
-  if (!HttpCheckPriviledgedAccess()) { return; }
+   // Ohne Referer (Lesezeichen, Adresse eingetippt) lehnte HttpCheckPriviledgedAccess() die Seite
+   // stumm ab — der Browser zeigte nur "keine Daten". Die Seite selbst ist statisch; jede Aktion
+   // laeuft ueber /cm, und dort bleibt Tasmotas Referer-Pruefung voll wirksam. Deshalb hier nur
+   // ein FREMDER Referer abgewiesen, ein fehlender nicht. Das Web-Passwort gilt weiterhin.
+  if (Webserver->header(F("Referer")).length()) {
+    if (!HttpCheckPriviledgedAccess()) { return; }
+  } else {
+    if (HTTP_USER == Web.state) { HandleRoot(); return; }
+    if (!WebAuthenticate()) { Webserver->requestAuthentication(); return; }
+  }
   File f;
   if (ufsp) { f = ufsp->open(EEBUS_UI_FILE, "r"); }
   if (!f && ffsp) { f = ffsp->open(EEBUS_UI_FILE, "r"); }
@@ -5794,6 +6259,7 @@ void EebusSrvLinkConn(void) {
   if (cc->rd_buf)    { free(cc->rd_buf);    cc->rd_buf = nullptr; }   // Leseantwort freigeben
   cc->rd_ent = -1; cc->rd_feat = -1;
   cc->lpc_limit_id = -1;
+  cc->lim_id[0] = -1; cc->lim_id[1] = -1;
   cc->lpc_peer_ent = 1;
   cc->lpc_peer_feat = 6;   // Default; wird aus der Peer-Discovery aktualisiert
   cc->lpc_deadline = 0;
@@ -6148,6 +6614,7 @@ bool Xdrv126(uint32_t function) {
         EebusMdnsAdvertise();
       }
       EebusAutoConnectRun();   // selbsttaetiger Wiederaufbau nach einem Neustart
+      EebusPairRun();   // SHIP Pairing Service: Ankuendigung aufnehmen bzw. nach 15 min entfernen
 #ifdef USE_WEBSERVER
       EebusWebClickRun();   // vorgemerkte Verbinden/Trennen-Klicks (NIE im HTTP-Handler)
 #endif
@@ -6315,7 +6782,7 @@ bool Xdrv126(uint32_t function) {
    // Abbruchstellen den Wiederaufbau ein — blieb die Verbindung deshalb einfach weg,
    // obwohl keepalive gesetzt war. Lieber einmal zu viel geplant als eine Steuerbox, die still steht.
         if ((SME_OFF == ESp->sme) && ESp->keepalive && !ESp->reconnect_at && (ESp->peer_idx >= 0)) {
-          ESp->reconnect_at = millis() + (ESp->sme_pending_logged ? EEBUS_PENDING_RETRY_MS : EEBUS_SPINE_KEEPALIVE_MS);
+          ESp->reconnect_at = millis() + EebusRetryMs();
         }
    // Heartbeat-NOTIFY alle 20 s an den DeviceDiagnosis-Leser/Abonnenten (Verbindungsueberwachung).
    // 20 s (war 30) — muss UNTER Ladestations Ablauf (unser gemeldeter PT30S -> ~31 s) bleiben, sonst
@@ -6367,7 +6834,7 @@ bool Xdrv126(uint32_t function) {
           if (idx >= 0) {
             AddLog(LOG_LEVEL_INFO, PSTR("EBG: Auto-Reconnect zu Peer %d (Slot %d)"), idx, ci);
             if (!EebusShipConnect(idx) && ESp->keepalive) {
-              ESp->reconnect_at = millis() + (ESp->sme_pending_logged ? EEBUS_PENDING_RETRY_MS : EEBUS_SPINE_KEEPALIVE_MS);   // fehlgeschlagen -> spaeter erneut
+              ESp->reconnect_at = millis() + EebusRetryMs();   // fehlgeschlagen -> spaeter erneut
             }
           }
         }
