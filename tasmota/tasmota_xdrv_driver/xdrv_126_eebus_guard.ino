@@ -499,6 +499,7 @@ typedef struct {
   char host[33];   // mDNS-Hostname
   uint16_t port;
 } EebusPeer;
+void EebusPeerIpFromInbound(EebusPeer *p);   // definiert hinter den Verbindungs-Slots
 
 struct {
   mdns_search_once_t *scan = nullptr;
@@ -1095,6 +1096,7 @@ void EebusPollScan(void) {
         }
       }
       if (dup) { continue; }
+      EebusPeerIpFromInbound(p);   // eingehend verbunden? dann deren Adresse (s. dort)
       Eebus.peer_count++;
     }
     mdns_query_results_free(results);
@@ -1490,6 +1492,23 @@ EebusConn EConn[EEBUS_MAX_CONN];   // die 3 Verbindungs-Slots
 EebusConn *ESp = &EConn[0];   // "aktueller Slot" — alle Bestandsfunktionen arbeiten hierueber
 
 // Slot mit bestehender/zuletzt genutzter Verbindung zu dieser SKI (-1 = keiner).
+// Ist das Geraet bereits EINGEHEND verbunden, gilt fuer seinen Eintrag in der Fundliste die Adresse,
+// von der die Verbindung wirklich kommt. evcc kuendigt per mDNS mitunter eine Adresse an, unter der es
+// nicht mehr erreichbar ist (gesehen: Ankuendigung 10.44.30.23, Verbindung und Weboberflaeche unter
+// 10.44.30.35). Erkannt an der SHIP-ID, die das Geraet in mDNS und Verbindung gleich fuehrt.
+void EebusPeerIpFromInbound(EebusPeer *p) {
+  for (int ci = 0; ci < EEBUS_MAX_CONN; ci++) {
+    EebusConn *cc = &EConn[ci];
+    if (cc->via_srv && cc->active && (SME_DONE == cc->sme) && cc->peer_id[0] && p->id[0] &&
+        (0 == strcmp(cc->peer_id, p->id)) && cc->peer_ip[0] && (0 != strcmp(cc->peer_ip, p->ip))) {
+      AddLog(LOG_LEVEL_INFO, PSTR("EBG: %s kuendigt %s an, ist aber von %s verbunden - nehme %s"),
+             p->id, p->ip, cc->peer_ip, cc->peer_ip);
+      strlcpy(p->ip, cc->peer_ip, sizeof(p->ip));
+      return;
+    }
+  }
+}
+
 int EebusConnBySki(const char *ski) {
   if ((nullptr == ski) || ('\0' == ski[0])) { return -1; }
   for (int i = 0; i < EEBUS_MAX_CONN; i++) {
@@ -4497,6 +4516,20 @@ void EebusSmePoll(void) {
 int EebusConnectPeer(int idx) {
   if ((idx < 0) || (idx >= (int)Eebus.peer_count)) { return -1; }
   if (!Eebus.cert_ok && !EebusEnsureCert(false)) { return -1; }
+   // Steht das Geraet schon EINGEHEND (z.B. evcc als Energiemanager verbindet sich selbst), keinen
+   // zweiten, ausgehenden Slot dazu aufbauen: der haengt sonst im Wiederaufbau zu einer Adresse, an
+   // der gar kein Server wartet, und belegt dauerhaft einen der drei Slots. Erkannt an der SHIP-ID,
+   // die das Geraet in mDNS und in der Verbindung gleich fuehrt.
+  for (int i = 0; i < EEBUS_MAX_CONN; i++) {
+    EebusConn *cc = &EConn[i];
+    if (cc->via_srv && cc->active && (SME_DONE == cc->sme) && cc->peer_id[0] && Eebus.peers[idx].id[0] &&
+        (0 == strcmp(cc->peer_id, Eebus.peers[idx].id))) {
+      AddLog(LOG_LEVEL_INFO, PSTR("EBG: %s ist bereits eingehend verbunden (Slot %d) - kein zweiter Aufbau"),
+             Eebus.peers[idx].id, i);
+      ESp = cc;
+      return i;
+    }
+  }
   int ci = EebusConnAlloc(Eebus.peers[idx].ski);
   if (ci < 0) {
     AddLog(LOG_LEVEL_INFO, PSTR("EBG: alle %d Verbindungs-Slots belegt (EEBusDisconnect <idx>)"), EEBUS_MAX_CONN);
@@ -5028,7 +5061,7 @@ void EebusFsCheckResult(const char *json) {
   ESp->fs_readback_at = millis() + 1500;   // neuen Wert zuruecklesen -> EEBusData
 }
 
-// EEBusFailsafe <idx|ski|hm> bezug|einspeisung|dauer <wert>
+// EEBusFailsafe <idx|ski|ip|hm> bezug|einspeisung|dauer <wert>
 void CmndEebusFailsafe(void) {
   char a[3][48] = { { 0 }, { 0 }, { 0 } };
   int n = 0;
@@ -5408,6 +5441,17 @@ bool EebusSelectPeerArg(const char *arg) {
     }
     if (1 == n) { ESp = &EConn[found]; return true; }
     ResponseCmndChar_P(n ? PSTR("mehrere Verbindungen - SKI-Praefix angeben") : PSTR("keine stehende Verbindung"));
+    return false;
+  }
+   // Adresse statt SKI: EINGEHENDE Verbindungen (z.B. evcc als Energiemanager) fuehren mangels
+   // Client-Zertifikat die IP als Pseudo-SKI. Ohne diesen Zweig wurde "10.44.30.35" als Listennummer
+   // gelesen und mit "Index 0..N-1 aus EEBusPeers noetig" abgewiesen.
+  if (nullptr != strchr(arg, '.')) {
+    for (int i = 0; i < EEBUS_MAX_CONN; i++) {
+      if (EConn[i].active && (SME_DONE == EConn[i].sme) &&
+          ((0 == strcmp(EConn[i].peer_ip, arg)) || (0 == strcmp(EConn[i].peer_ski, arg)))) { ESp = &EConn[i]; return true; }
+    }
+    ResponseCmndChar_P(PSTR("keine stehende Verbindung mit dieser Adresse"));
     return false;
   }
   bool is_ski = false;
@@ -6181,6 +6225,12 @@ typedef struct {
   bool     cmi_done = false;   // CMI [0,0] des Geraets beantwortet?
   uint8_t *abuf = nullptr;   // Ansammelpuffer (HTTP-Request, dann WS-Frames)
   size_t   abuf_len = 0;
+   // Fragmentierte WS-Nachrichten (FIN=0 + Fortsetzungsrahmen) zusammensetzen. evcc (gorilla/websocket)
+   // schickt groessere Nachrichten in Fragmenten — u.a. seine Detailed Discovery. Frueher verworfen:
+   // dann fehlte die Selbstauskunft, und Binding/Limit liefen an eine geratene Adresse.
+  uint8_t *fbuf = nullptr;   // zusammengesetzte Nutzlast (waechst bei Bedarf, max. EEBUS_SRV_ABUF)
+  size_t   flen = 0;
+  bool     fragging = false;   // gerade eine fragmentierte Nachricht im Bau?
    // Etappe 3: SME-Handshake als Server (Geraet = SHIP-Client)
   uint8_t  sme_state = 0;   // 0=warte Hello, 1=warte announceMax, 2=warte select-Spiegel, 3=DONE
    // Etappe 4: Verknuepfung mit einem EConn-Slot (SPINE-Datenphase)
@@ -6212,6 +6262,9 @@ void EebusSrvFree(void) {
   if (ESrv.obuf)     { free(ESrv.obuf);     ESrv.obuf = nullptr; }
   if (ESrv.cert_der) { free(ESrv.cert_der); ESrv.cert_der = nullptr; }
   if (ESrv.abuf)     { free(ESrv.abuf);     ESrv.abuf = nullptr; }
+  if (ESrv.fbuf)     { free(ESrv.fbuf);     ESrv.fbuf = nullptr; }
+  ESrv.flen = 0;
+  ESrv.fragging = false;
   ESrv.cert_len = 0;
   ESrv.active = false;
   ESrv.hs_done = false;
@@ -6567,6 +6620,29 @@ void EebusSrvSmeHandle(int classifier, const char *json) {
 // angesammelte App-Daten verarbeiten — Phase 0: HTTP-Upgrade-Request bis \r\n\r\n
 // sammeln + 101 antworten; Phase 1: WS-Frames parsen (Client-Frames sind MASKIERT),
 // CMI [0,0] beantworten, SHIP-Nachrichten an den SME-Server-Handler geben.
+// Eine vollstaendige SHIP-Nachricht verarbeiten: [0]=Klassifizierer (1=control/SME, 2=data/SPINE,
+// 3=close), dann JSON. pl[len] muss beschreibbar sein (temporaere NUL-Terminierung fuer strstr).
+// false = der Handler hat die Verbindung beendet (Puffer sind dann freigegeben).
+bool EebusSrvShipMsg(uint8_t *pl, size_t len) {
+  uint8_t saved = pl[len];
+  pl[len] = '\0';
+  if (2 != pl[0]) {   // klass=2 loggt der Dispatch via EebusShipLog (voll)
+    char txt[161];
+    size_t show = (len > 1) ? len - 1 : 0;
+    if (show > sizeof(txt) - 1) { show = sizeof(txt) - 1; }
+    for (size_t i = 0; i < show; i++) {
+      txt[i] = ((pl[1 + i] >= 32) && (pl[1 + i] < 127)) ? (char)pl[1 + i] : '.';
+    }
+    txt[show] = '\0';
+    AddLog(LOG_LEVEL_INFO, PSTR("EBG: SRV SHIP RX von %s klass=%d len=%u: %s"),
+           ESrv.peer_ip, pl[0], (uint32_t)len, txt);
+  }
+  EebusSrvSmeHandle(pl[0], (const char*)pl + 1);   // SME-Server-Zustandsmaschine
+  if (!ESrv.active) { return false; }
+  pl[len] = saved;
+  return true;
+}
+
 void EebusSrvAppData(void) {
   if (0 == ESrv.ws_state) {
     if (ESrv.abuf_len < 4) { return; }
@@ -6629,8 +6705,34 @@ void EebusSrvAppData(void) {
     } else if (0x9 == opcode) {   // Ping -> Pong gleiche Payload
       EebusSrvWsSendOp(pl, len, 0xA);
     } else if (!fin || (0x0 == opcode)) {
-      AddLog(LOG_LEVEL_INFO, PSTR("EBG: SRV %s: fragmentierte WS-Nachricht (%u B) — Etappe 2 verworfen"),
-             ESrv.peer_ip, (uint32_t)len);
+   // Fragment: erstes (Daten-Opcode, FIN=0) beginnt, Fortsetzungen (Opcode 0) haengen an,
+   // die mit FIN=1 schliesst ab -> dann wie eine ungeteilte Nachricht verarbeiten.
+      if (0x0 != opcode) { ESrv.fragging = true; ESrv.flen = 0; }
+      if (!ESrv.fragging) {
+        AddLog(LOG_LEVEL_INFO, PSTR("EBG: SRV %s: Fortsetzungsrahmen ohne Anfang (%u B) verworfen"),
+               ESrv.peer_ip, (uint32_t)len);
+      } else {
+   // Puffer waechst nur so weit wie noetig (kein PSRAM auf dem ESP32-D0WD: jedes KB kommt aus dem Heap)
+        uint8_t *nb = (ESrv.flen + len <= EEBUS_SRV_ABUF) ? (uint8_t*)realloc(ESrv.fbuf, ESrv.flen + len + 1) : nullptr;
+        if (nullptr == nb) {
+          AddLog(LOG_LEVEL_INFO, PSTR("EBG: SRV %s: fragmentierte Nachricht (%u B) passt nicht in den Speicher, verworfen"),
+                 ESrv.peer_ip, (uint32_t)(ESrv.flen + len));
+          if (ESrv.fbuf) { free(ESrv.fbuf); ESrv.fbuf = nullptr; }
+          ESrv.fragging = false; ESrv.flen = 0;
+        } else {
+          ESrv.fbuf = nb;
+          memcpy(ESrv.fbuf + ESrv.flen, pl, len);
+          ESrv.flen += len;
+          if (fin) {
+            ESrv.fragging = false;
+            size_t ml = ESrv.flen;
+            ESrv.flen = 0;
+            AddLog(LOG_LEVEL_DEBUG, PSTR("EBG: SRV %s: fragmentierte Nachricht zusammengesetzt (%u B)"), ESrv.peer_ip, (uint32_t)ml);
+            if (!EebusSrvShipMsg(ESrv.fbuf, ml)) { return; }   // Verbindung beendet (Puffer weg!)
+            if (ESrv.fbuf) { free(ESrv.fbuf); ESrv.fbuf = nullptr; }   // Speicher sofort zurueck
+          }
+        }
+      }
     } else if (!ESrv.cmi_done && (2 == len) && (0x00 == pl[0])) {
    // SHIP 13.4.3 CMI: Geraet (WS-Client) sendet [0x00,0x00], wir antworten gleich
       uint8_t cmi[2] = { 0x00, 0x00 };
@@ -6644,24 +6746,7 @@ void EebusSrvAppData(void) {
         return;
       }
     } else if (len > 0) {
-   // SHIP-Nachricht: [0]=Klassifizierer (1=control/SME, 2=data/SPINE, 3=close), dann JSON.
-   // Payload liegt komplett im abuf -> temporaer NUL-terminieren fuer strstr-Parsing.
-      uint8_t saved = pl[len];
-      pl[len] = '\0';
-      if (2 != pl[0]) {   // klass=2 loggt der Dispatch via EebusShipLog (voll)
-        char txt[161];
-        size_t show = (len > 1) ? len - 1 : 0;
-        if (show > sizeof(txt) - 1) { show = sizeof(txt) - 1; }
-        for (size_t i = 0; i < show; i++) {
-          txt[i] = ((pl[1 + i] >= 32) && (pl[1 + i] < 127)) ? (char)pl[1 + i] : '.';
-        }
-        txt[show] = '\0';
-        AddLog(LOG_LEVEL_INFO, PSTR("EBG: SRV SHIP RX von %s klass=%d len=%u: %s"),
-               ESrv.peer_ip, pl[0], (uint32_t)len, txt);
-      }
-      EebusSrvSmeHandle(pl[0], (const char*)pl + 1);   // SME-Server-Zustandsmaschine
-      if (!ESrv.active) { return; }   // Handler hat die Verbindung beendet (abuf weg!)
-      pl[len] = saved;
+      if (!EebusSrvShipMsg(pl, len)) { return; }   // Verbindung beendet (abuf weg!)
     }
     size_t used = ho + len;   // Frame aus dem Puffer nehmen
     memmove(ESrv.abuf, ESrv.abuf + used, ESrv.abuf_len - used);
