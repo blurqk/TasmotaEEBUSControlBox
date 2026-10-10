@@ -191,6 +191,9 @@
   .quick button[disabled]{opacity:.45;cursor:not-allowed}
   .quick input{width:110px}
   .quick .hint{margin:0}
+  /* Schnellwahl: Buttons teilen sich die ganze Zeile; Aktionszeile mittig */
+  .quick.fill button{flex:1 1 0;min-width:0}
+  .quick.center{justify-content:center}
   /* Ausgaenge (Relais-LEDs des Geraets) */
   .leds{display:flex;gap:24px;flex-wrap:wrap;margin:8px 0}
   .ledi{display:flex;align-items:center;gap:7px;font-weight:600}
@@ -337,20 +340,20 @@
   <div class="duo" data-page="control">
     <section id="t_lpc" class="card">
       <h2>§ 14a EnWG — Bezug (LPC)</h2>
-      <div class="quick">
+      <div class="quick fill">
         <button id="q_lpc_on" onclick="lpcSchnell(true)" title="Grenzwert 4200 W setzen und senden">Begrenzen · 4200 W</button>
         <button id="q_lpc_off" class="sec" onclick="lpcSchnell(false)" title="Begrenzung aufheben">Keine Begrenzung</button>
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpc_val" value="" placeholder="z. B. 4200"></div>
       <div class="row2"><label>Dauer [s]</label><input type="number" id="lpc_dur" value="900" min="0" max="86400" step="60"></div>
-      <div class="quick">
+      <div class="quick center">
         <button onclick="sendLpc()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpc()">Aufheben</button>
       </div>
     </section>
     <section id="t_lpp" class="card">
       <h2>§ 9 EEG — Einspeisung (LPP)</h2>
-      <div class="quick">
+      <div class="quick fill">
         <button class="qpv" data-pct="0" onclick="lppSchnell(0)">0 %</button>
         <button class="qpv" data-pct="30" onclick="lppSchnell(30)">30 %</button>
         <button class="qpv" data-pct="60" onclick="lppSchnell(60)">60 %</button>
@@ -358,7 +361,7 @@
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpp_val" value="" placeholder="Betrag"></div>
       <div class="row2"><label>Dauer [s]</label><input type="number" id="lpp_dur" value="900" min="0" max="86400" step="60"></div>
-      <div class="quick">
+      <div class="quick center">
         <button onclick="sendLpp()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpp()">Aufheben</button>
       </div>
