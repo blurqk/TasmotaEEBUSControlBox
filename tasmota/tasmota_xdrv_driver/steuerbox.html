@@ -31,7 +31,7 @@
   Aenderungen (ab Treiber v142/v143):
     - SKI ist ab Werk VERDECKT, per Knopf einblendbar
       Verdeckt wird auch die Antwortzeile, dort steht die SKI sonst im Rohtext.
-    - Dauer-Feld: Vorgabe 900 s, Bereich 0..86400 s. LEER heisst "keine Angabe" (der Treiber
+    - Dauer-Feld: Vorgabe 600 s, Bereich 0..86400 s. LEER heisst "keine Angabe" (der Treiber
       nimmt dann seine Vorgabe) und NICHT mehr stillschweigend 0/unbefristet.
     - Warntext zur abgelaufenen Geltungsdauer richtiggestellt: die Steuerbox raeumt sie seit v142
       selbst weg; gefaehrlich ist der Zustand nur noch bei abgeschaltetem Loeschfilter.
@@ -345,7 +345,7 @@
         <button id="q_lpc_off" class="sec" onclick="lpcSchnell(false)" title="Begrenzung aufheben">Keine Begrenzung</button>
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpc_val" value="" placeholder="z. B. 4200"></div>
-      <div class="row2"><label>Dauer [s]</label><input type="number" id="lpc_dur" value="900" min="0" max="86400" step="60"></div>
+      <div class="row2"><label>Dauer [s]</label><input type="number" id="lpc_dur" value="600" min="0" max="86400" step="60"></div>
       <div class="quick center">
         <button onclick="sendLpc()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpc()">Aufheben</button>
@@ -360,14 +360,14 @@
         <button class="qpv" data-pct="100" onclick="lppSchnell(100)" title="Begrenzung aufheben">100 %</button>
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpp_val" value="" placeholder="Betrag"></div>
-      <div class="row2"><label>Dauer [s]</label><input type="number" id="lpp_dur" value="900" min="0" max="86400" step="60"></div>
+      <div class="row2"><label>Dauer [s]</label><input type="number" id="lpp_dur" value="600" min="0" max="86400" step="60"></div>
       <div class="quick center">
         <button onclick="sendLpp()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpp()">Aufheben</button>
       </div>
     </section>
   </div>
-  <p class="hint" data-page="control" style="margin:-4px 0 14px">Dauer: 900&nbsp;s = ¼&nbsp;Stunde ·
+  <p class="hint" data-page="control" style="margin:-4px 0 14px">Dauer: 600&nbsp;s = 10&nbsp;Minuten ·
     0 = unbefristet · leer = Vorgabe des Treibers. Einspeisung als Betrag — das Vorzeichen setzt der Treiber.</p>
 
   <!-- ===== ANLAGE (Settings) ===== -->
@@ -803,6 +803,7 @@
       // Control-Seite: verbundene Geraete aus den Slots, Daten ALLER verbundenen Geraete laden
       slots = st.Slots || [];
       ctlListe();
+      ucsLaden();
       if(slots.some(function(s){ return s.Sme === 'done'; })) { loadData(); }
       else { daten = {}; controlZeigen(); fsTabelle(); }
       // Die Plakette oben rechts sagt NICHT, was dieses Geraet ist (das steht im Titel), sondern
@@ -864,7 +865,6 @@
       var c = el('connstate');
       if(slot && slot.Sme === 'done'){
         c.textContent = 'verbunden'; c.className = 'pill ok';
-        if(slot.LpcResult) say(slot.LpcResult);
         loadStruct();                     // Struktur der Gegenstelle (einmal je Gerät)
       } else if(slot){
         c.textContent = 'im Aufbau (' + slot.Sme + ')'; c.className = 'pill';
@@ -1381,29 +1381,35 @@
   }
 
   // Befehle an die Auswahl der Control-Seite: einzeln an jedes Zielgeraet, nacheinander
-  function anAlle(befehl, was){
-    var z = ziele();
-    if(!z.length){ say('Kein verbundenes Gerät in der Auswahl.'); return; }
+  function anAlle(befehl, was, uc){
+    var z = zieleFuer(uc);
+    var weg = ziele().filter(function(g){ return !z.some(function(x){ return x.ski === g.ski; }); });
+    var nicht = weg.length ? ('\nübersprungen (kein ' + (uc === 'lpc' ? '§ 14a' : '§ 9') + '): '
+                + weg.map(function(g){ return g.name; }).join(', ')) : '';
+    if(!z.length){ say(ziele().length ? 'Kein Gerät in der Auswahl unterstützt ' + (uc === 'lpc' ? '§ 14a (Bezug).' : '§ 9 (Einspeisung).')
+                                       : 'Kein verbundenes Gerät in der Auswahl.'); return; }
     var log = [];
     z.reduce(function(pr, g){
       return pr.then(function(){
-        return cmd(befehl(g)).then(function(j){ log.push(g.name + ': ' + JSON.stringify(j)); });
+        // Antwort ist nicht immer gueltiges JSON (gesendete Rahmen mischen sich hinein) — der
+        // Befehl ist dann trotzdem gesendet; das Ergebnis folgt in Status und Meldungen.
+        return cmd(befehl(g)).then(function(j){ log.push(g.name + ': ' + (j ? JSON.stringify(j) : 'gesendet')); });
       });
-    }, Promise.resolve()).then(function(){ say(was + '\n' + log.join('\n')); nachladen(); });
+    }, Promise.resolve()).then(function(){ say(was + '\n' + log.join('\n') + nicht); nachladen(); });
   }
   function ski8(g){ return g.ski.substring(0, 8); }
   function sendLpc(){
     var v = (el('lpc_val').value || '').trim();
     if(v === ''){ say('Erst einen Grenzwert eintragen.'); el('lpc_val').focus(); return; }
-    anAlle(function(g){ return 'EEBusLpc ' + ski8(g) + ' ' + v + durArg('lpc_dur'); }, 'Bezugsgrenze ' + v + ' W');
+    anAlle(function(g){ return 'EEBusLpc ' + ski8(g) + ' ' + v + durArg('lpc_dur'); }, 'Bezugsgrenze ' + v + ' W', 'lpc');
   }
-  function freeLpc(){ anAlle(function(g){ return 'EEBusRelease ' + ski8(g); }, 'Bezugsgrenze aufheben'); }
+  function freeLpc(){ anAlle(function(g){ return 'EEBusRelease ' + ski8(g); }, 'Bezugsgrenze aufheben', 'lpc'); }
   function sendLpp(){
     var v = (el('lpp_val').value || '').trim();
     if(v === ''){ say('Erst einen Grenzwert eintragen.'); el('lpp_val').focus(); return; }
-    anAlle(function(g){ return 'EEBusLpp ' + ski8(g) + ' ' + v + durArg('lpp_dur'); }, 'Einspeisegrenze ' + v + ' W');
+    anAlle(function(g){ return 'EEBusLpp ' + ski8(g) + ' ' + v + durArg('lpp_dur'); }, 'Einspeisegrenze ' + v + ' W', 'lpp');
   }
-  function freeLpp(){ anAlle(function(g){ return 'EEBusLppFrei ' + ski8(g); }, 'Einspeisegrenze aufheben'); }
+  function freeLpp(){ anAlle(function(g){ return 'EEBusLppFrei ' + ski8(g); }, 'Einspeisegrenze aufheben', 'lpp'); }
 
 
   // Statusabfrage bewusst SPARSAM: jede Abfrage schreibt vier Zeilen in die Geräte-Konsole, und
@@ -1587,6 +1593,29 @@
     var v = verbundene();
     return (ctlWahl === 'all') ? v : v.filter(function(g){ return g.ski === ctlWahl; });
   }
+  // Anwendungsfaelle je Geraet (aus EEBusStruct, einmal je Geraet). Unbekannt = wie bisher behandeln.
+  var ucs = {}, ucsHolen = {};
+  var UC_NAME = { lpc: 'limitationOfPowerConsumption', lpp: 'limitationOfPowerProduction' };
+  function ucsLaden(){
+    verbundene().forEach(function(g){
+      if(ucs[g.ski] || ucsHolen[g.ski]) return;
+      ucsHolen[g.ski] = true;
+      cmd('EEBusStruct ' + ski8(g)).then(function(j){
+        var r = j && j.EEBusStruct;
+        if(r && r.Entities && Array.isArray(r.UseCases)){ ucs[g.ski] = r.UseCases; controlZeigen(); }
+      }).then(function(){ ucsHolen[g.ski] = false; }, function(){ ucsHolen[g.ski] = false; });
+    });
+  }
+  // unterstuetzt das Geraet den Anwendungsfall? (uc = 'lpc' | 'lpp'; unbekannt -> ja)
+  function kann(g, uc){
+    var l = ucs[g.ski];
+    return !uc || !l || (l.indexOf(UC_NAME[uc]) >= 0);
+  }
+  // Ziele fuer einen Anwendungsfall: bei "Alle" nur passende Geraete, ein einzelnes immer
+  function zieleFuer(uc){
+    var z = ziele();
+    return (ctlWahl === 'all') ? z.filter(function(g){ return kann(g, uc); }) : z;
+  }
   function ctlListe(){
     var v = verbundene(), bekannt = (ctlWahl === 'all');
     var h = '<option value="all">Alle verbundenen Geräte (' + v.length + ')</option>';
@@ -1624,7 +1653,8 @@
       if(!sl.Ip || sl.State === 'idle') return;
       var g = geraeteName(sl.PeerSki, sl.Ip, sl.PeerId);
       if(sl.Error) m.push({ f: true, g: g, t: 'Verbindung: ' + sl.Error });
-      if(sl.LpcResult) m.push({ f: istFehler(sl.LpcResult), g: g, t: 'Grenze: ' + sl.LpcResult });
+      var ohneLpp = sl.PeerSki && !kann({ ski: sl.PeerSki.toLowerCase() }, 'lpp');
+      if(sl.LpcResult && !(ohneLpp && /produce/i.test(sl.LpcResult))) m.push({ f: istFehler(sl.LpcResult), g: g, t: 'Grenze: ' + sl.LpcResult });
       if(sl.FsResult) m.push({ f: istFehler(sl.FsResult), g: g, t: 'Failsafe: ' + sl.FsResult });
     });
     verbundene().forEach(function(g){
@@ -1669,9 +1699,10 @@
   function sendFs(art, id){
     var v = parseFloat(String(el(id).value || '').replace(',', '.'));
     if(!(v >= 0)){ say('Erst einen Wert eintragen.'); el(id).focus(); return; }
-    var z = ziele();
-    if(!z.length){ say('Kein verbundenes Gerät in der Auswahl (Control-Seite).'); return; }
-    anAlle(function(g){ return 'EEBusFailsafe ' + ski8(g) + ' ' + art + ' ' + Math.round(v); }, 'Failsafe ' + art);
+    var uc = (art === 'bezug') ? 'lpc' : (art === 'einspeisung') ? 'lpp' : null;
+    var z = zieleFuer(uc);
+    if(!z.length){ say('Kein passendes verbundenes Gerät in der Auswahl (Control-Seite).'); return; }
+    anAlle(function(g){ return 'EEBusFailsafe ' + ski8(g) + ' ' + art + ' ' + Math.round(v); }, 'Failsafe ' + art, uc);
     setTimeout(function(){
       cmd('EEBusStatus').then(function(s){
         var sl = (s && s.EEBusStatus && s.EEBusStatus.Slots) || [];
@@ -1749,7 +1780,9 @@
     var h = '';
     z.forEach(function(g){
       var d = daten[g.ski] || {};
-      h += '<tr><td>' + esc(g.name) + '</td><td class="mono">' + esc(zust(d.Lim0)) + '</td><td class="mono">' + esc(zust(d.Lim1)) + '</td><td>';
+      var z0 = kann(g, 'lpc') ? zust(d.Lim0) : 'nicht unterstützt';
+      var z1 = kann(g, 'lpp') ? zust(d.Lim1) : 'nicht unterstützt';
+      h += '<tr><td>' + esc(g.name) + '</td><td class="mono">' + esc(z0) + '</td><td class="mono">' + esc(z1) + '</td><td>';
       ledRegeln.forEach(function(r){
         h += '<span class="ledi" title="' + esc(ledText(r)) + '"><span class="led ' + ledZustand(r, d) + '"></span>' + esc(r.n) + '</span>';
       });
@@ -1758,16 +1791,19 @@
     el('leds').innerHTML = h
       ? '<table class="fstab"><tr><th>Gerät</th><th>Bezug § 14a</th><th>Einspeisung § 9</th><th>Ausgänge</th></tr>' + h + '</table>'
       : '<p class="hint">Kein verbundenes Gerät in der Auswahl.</p>';
-    function alle(f){ return z.length > 0 && z.every(function(g){ return f(daten[g.ski] || {}); }); }
-    el('q_lpc_on').classList.toggle('sel', alle(function(d){ var c = d.Lim0, v = c ? num(c.Wert) : null; return !!(c && c.Aktiv && v !== null && Math.abs(v) === LPC_SCHNELL_W); }));
-    el('q_lpc_off').classList.toggle('sel', alle(function(d){ return !!(d.Lim0 && !d.Lim0.Aktiv); }));
+    function alle(f, uc){
+      var zz = z.filter(function(g){ return kann(g, uc); });
+      return zz.length > 0 && zz.every(function(g){ return f(daten[g.ski] || {}); });
+    }
+    el('q_lpc_on').classList.toggle('sel', alle(function(d){ var c = d.Lim0, v = c ? num(c.Wert) : null; return !!(c && c.Aktiv && v !== null && Math.abs(v) === LPC_SCHNELL_W); }, 'lpc'));
+    el('q_lpc_off').classList.toggle('sel', alle(function(d){ return !!(d.Lim0 && !d.Lim0.Aktiv); }, 'lpc'));
     var wp = pvWp();
     document.querySelectorAll('.qpv').forEach(function(b){
       var bp = Number(b.dataset.pct);
       b.disabled = (bp < 100) && !wp;
       b.title = b.disabled ? 'Erst die installierte PV-Leistung eintragen (Settings → Anlage)'
               : (bp >= 100 ? 'Begrenzung aufheben' : 'Einspeisung auf ' + Math.round(wp * bp / 100).toLocaleString('de-DE') + ' W begrenzen');
-      b.classList.toggle('sel', alle(function(d){ var pct = einspeisungPct(d.Lim1); return pct !== null && Math.abs(pct - bp) < 0.5; }));
+      b.classList.toggle('sel', alle(function(d){ var pct = einspeisungPct(d.Lim1); return pct !== null && Math.abs(pct - bp) < 0.5; }, 'lpp'));
     });
   }
   function ledCfgZeigen(){
