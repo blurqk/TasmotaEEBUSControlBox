@@ -1415,23 +1415,42 @@
   }
 
   // Befehle an die Auswahl der Control-Seite: einzeln an jedes Zielgeraet, nacheinander
+  // Hinweise zum letzten Befehl (uebersprungene Geraete) — erscheinen unter Meldungen bis zum naechsten Befehl
+  var sendMeld = [];
   function anAlle(befehl, was, uc){
-    var z = zieleFuer(uc);
-    var weg = ziele().filter(function(g){ return !z.some(function(x){ return x.ski === g.ski; }); });
-    var nicht = weg.length ? ('\nübersprungen (kein ' + (uc === 'lpc' ? '§ 14a' : '§ 9') + '): '
-                + weg.map(function(g){ return g.name; }).join(', ')) : '';
-    if(!z.length){ say(ziele().length ? 'Kein Gerät in der Auswahl unterstützt ' + (uc === 'lpc' ? '§ 14a (Bezug).' : '§ 9 (Einspeisung).')
-                                       : 'Kein verbundenes Gerät in der Auswahl.'); return; }
-    var log = [];
-    z.reduce(function(pr, g){
-      return pr.then(function(){
-        // Antwort ist nicht immer gueltiges JSON (gesendete Rahmen mischen sich hinein) — der
-        // Befehl ist dann trotzdem gesendet; das Ergebnis folgt in Status und Meldungen.
-        return cmd(befehl(g)).then(function(j){ log.push(g.name + ': ' + (j ? JSON.stringify(j) : 'gesendet')); });
-      });
-    }, Promise.resolve()).then(function(){ say(was + '\n' + log.join('\n') + nicht); nachladen(); });
+    var vorher = ziele();
+    // Verbindungsstand unmittelbar vor dem Senden frisch holen: die Seite fragt nur alle 20 s ab, und
+    // ein Geraet, das gerade neu verbindet (evcc nach einem Neustart der Steuerbox), soll nicht als
+    // Ziel gelten — sonst kommt nur "keine stehende Verbindung" zurueck.
+    cmd('EEBusStatus').then(function(j){
+      if(j && j.EEBusStatus){ slots = j.EEBusStatus.Slots || []; ctlListe(); }
+      var jetzt = ziele();
+      var weg = vorher.filter(function(g){ return !jetzt.some(function(x){ return x.ski === g.ski; }); });
+      var z = zieleFuer(uc);
+      var ohne = jetzt.filter(function(g){ return !z.some(function(x){ return x.ski === g.ski; }); });
+      var ucTxt = (uc === 'lpc') ? '§ 14a (Bezug)' : '§ 9 (Einspeisung)';
+      sendMeld = weg.map(function(g){ return { f: true, g: g.name, t: was + ': nicht gesendet — Gerät gerade nicht verbunden' }; })
+        .concat(ohne.map(function(g){ return { f: false, g: g.name, t: was + ': übersprungen — kein ' + ucTxt }; }));
+      meldungenZeigen();
+      var nicht = (weg.length ? '\ngerade nicht verbunden, übersprungen: ' + weg.map(function(g){ return g.name; }).join(', ') : '')
+                + (ohne.length ? '\nübersprungen (kein ' + (uc === 'lpc' ? '§ 14a' : '§ 9') + '): ' + ohne.map(function(g){ return g.name; }).join(', ') : '');
+      if(!z.length){
+        say((jetzt.length ? 'Kein Gerät in der Auswahl unterstützt ' + ucTxt + '.' : 'Kein verbundenes Gerät in der Auswahl.') + nicht);
+        return;
+      }
+      var log = [];
+      z.reduce(function(pr, g){
+        return pr.then(function(){
+          // Antwort ist nicht immer gueltiges JSON (gesendete Rahmen mischen sich hinein) — der
+          // Befehl ist dann trotzdem gesendet; das Ergebnis folgt in Status und Meldungen.
+          return cmd(befehl(g)).then(function(j){ log.push(g.name + ': ' + (j ? JSON.stringify(j) : 'gesendet')); });
+        });
+      }, Promise.resolve()).then(function(){ say(was + '\n' + log.join('\n') + nicht); nachladen(); });
+    });
   }
-  function ski8(g){ return g.ski.substring(0, 8); }
+
+  // Geraet im Befehl: SKI-Praefix — bei eingehenden Verbindungen (Pseudo-SKI = IP, z.B. evcc) die volle IP
+  function ski8(g){ return (g.ski.indexOf('.') >= 0) ? g.ski : g.ski.substring(0, 8); }
   function sendLpc(){
     var v = (el('lpc_val').value || '').trim();
     if(v === ''){ say('Erst einen Grenzwert eintragen.'); el('lpc_val').focus(); return; }
@@ -1618,7 +1637,8 @@
       if(s.Sme !== 'done' || !s.PeerSki) return;
       var ski = s.PeerSki.toLowerCase();
       if(out.some(function(o){ return o.ski === ski; })) return;
-      var p = peers.filter(function(x){ return x.Ski && x.Ski.toLowerCase() === ski; })[0];
+      // eingehende Verbindungen (evcc) fuehren die IP als Ersatz-SKI -> dann ueber die SHIP-ID zuordnen
+      var p = peers.filter(function(x){ return (x.Ski && x.Ski.toLowerCase() === ski) || (s.PeerId && x.Id === s.PeerId); })[0];
       out.push({ ski: ski, ip: s.Ip, name: p ? ((p.Model || p.Id) + (p.Brand ? ' · ' + p.Brand : '')) : (s.PeerId || s.Ip) });
     });
     return out;
@@ -1675,7 +1695,7 @@
   }
   // Name eines Geraets zu einer SKI bzw. Adresse (Fundliste, sonst SHIP-ID, sonst Adresse)
   function geraeteName(ski, ip, id){
-    var p = ski ? peers.filter(function(x){ return x.Ski && x.Ski.toLowerCase() === ski.toLowerCase(); })[0] : null;
+    var p = peers.filter(function(x){ return (ski && x.Ski && x.Ski.toLowerCase() === ski.toLowerCase()) || (id && x.Id === id); })[0];
     return p ? ((p.Model || p.Id) + (p.Brand ? ' · ' + p.Brand : '')) : (id || ip || '—');
   }
   // Fehler/Info je Geraet. Ablehnung, Zeitueberschreitung u.ae. gelten als Fehler, der Rest als Info.
@@ -1716,6 +1736,7 @@
       m.push({ f: false, g: 'alle', t: 'Für die Einspeise-Ausgänge fehlt die installierte PV-Leistung (Settings → Anlage).' });
     }
     if(lppDiff) m.push({ f: false, g: 'alle', h: lppDiff });
+    (sendMeld || []).forEach(function(x){ m.push(x); });
     // geloeschte Meldungen ausblenden — solange sie unveraendert bestehen. Was verschwunden ist,
     // faellt aus der Merkliste; kommt es spaeter wieder, wird es wieder angezeigt.
     var schluessel = function(x){ return (x.f ? 'F' : 'I') + '|' + x.g + '|' + (x.t || x.h); };
