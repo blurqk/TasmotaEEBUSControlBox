@@ -26,7 +26,7 @@ This fork adds **TinyC** — a C-subset compiler and VM running as `XDRV_124`. W
 
 ## ⚡ EEBUS control box: Weidmüller ERC support
 
-This repository ([blurqk/TasmotaEEBUSControlBox](https://github.com/blurqk/TasmotaEEBUSControlBox)) only adds a few extensions to the existing EEBUS Guard driver and its web UI. All other work, and the credit for it, belongs to the original authors:
+This repository ([blurqk/eebus-controlbox-tasmota](https://github.com/blurqk/eebus-controlbox-tasmota)) only adds a few extensions to the existing EEBUS Guard driver and its web UI. All other work, and the credit for it, belongs to the original authors:
 
 - **Tasmota** — [Theo Arends](https://github.com/arendst/Tasmota) and contributors
 - **This fork's base** including TinyC and scripting — [gemu2015](https://github.com/gemu2015/Sonoff-Tasmota) (Gerhard Mutz)
