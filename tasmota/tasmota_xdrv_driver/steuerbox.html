@@ -65,6 +65,10 @@
   .fstab{width:100%;border-collapse:collapse;margin:4px 0 10px;font-size:13px}
   .fstab th,.fstab td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
   .fstab th{color:var(--muted);font-weight:600}
+  .fstab td .ledi{margin-right:12px;display:inline-flex}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;border:1px solid}
+  .tag.fehler{color:var(--bad);border-color:var(--bad)}
+  .tag.info{color:var(--warn);border-color:var(--warn)}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px}
   .tab{flex:1 1 auto;padding:11px 8px;text-align:center;background:var(--panel2);border:1px solid var(--line);
@@ -323,10 +327,9 @@
        Soll-Zustand der Relais-Ausgaenge (Weidmueller ERC: S1, S2, W3, W4) je Zielgeraet, aus den
        Grenzen, die das Geraet ZURUECKGEMELDET hat. Zuordnung unter Settings. -->
   <div class="card" id="c_leds" data-page="control">
-    <h2>Ausgänge</h2>
-    <p class="hint" style="margin-top:0">Soll-Zustand aus den vom Gerät bestätigten Grenzen — zum Vergleich
-      mit den LEDs am Gerät. Gestrichelt = noch unbekannt.</p>
-    <p class="warn hide" id="led_pv">Für die Einspeise-Ausgänge fehlt die installierte PV-Leistung (Settings → Anlage).</p>
+    <h2>Status</h2>
+    <p class="hint" style="margin-top:0">Grenzen, wie die Geräte sie bestätigt haben, und der daraus folgende
+      Soll-Zustand der Ausgänge — zum Vergleich mit den LEDs am Gerät. Gestrichelt = noch unbekannt.</p>
     <div id="leds"></div>
   </div>
 
@@ -344,9 +347,6 @@
         <button onclick="sendLpc()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpc()">Aufheben</button>
       </div>
-      <h3>Ist-Zustand</h3>
-      <div id="lpc_state" class="mono">&mdash;</div>
-      <p class="warn hide" id="lpc_warn"></p>
     </section>
     <section id="t_lpp" class="card">
       <h2>§ 9 EEG — Einspeisung (LPP)</h2>
@@ -357,15 +357,11 @@
         <button class="qpv" data-pct="100" onclick="lppSchnell(100)" title="Begrenzung aufheben">100 %</button>
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpp_val" value="" placeholder="Betrag"></div>
-      <p class="warn hide" id="lpp_diff"></p>
       <div class="row2"><label>Dauer [s]</label><input type="number" id="lpp_dur" value="900" min="0" max="86400" step="60"></div>
       <div class="quick">
         <button onclick="sendLpp()">Begrenzung setzen</button>
         <button class="bad" onclick="freeLpp()">Aufheben</button>
       </div>
-      <h3>Ist-Zustand</h3>
-      <div id="lpp_state" class="mono">&mdash;</div>
-      <p class="warn hide" id="lpp_warn"></p>
     </section>
   </div>
   <p class="hint" data-page="control" style="margin:-4px 0 14px">Dauer: 900&nbsp;s = ¼&nbsp;Stunde ·
@@ -565,6 +561,15 @@
   <div class="card">
     <h3>Antwort des Geräts</h3>
     <div id="log">bereit</div>
+  </div>
+
+  <!-- ===== MELDUNGEN =====
+       Fehler und Hinweise an EINER Stelle, jeweils mit dem betroffenen Geraet — statt verstreuter
+       Warnkaesten in den Bedienbereichen. Aus EEBusStatus (Verbindungsfehler, Ergebnis des letzten
+       Grenz- bzw. Failsafe-Schreibens) und EEBusData (abgelaufene Geltungsdauer im Geraet). -->
+  <div class="card">
+    <h3>Meldungen</h3>
+    <div id="meld"><p class="hint" style="margin:0">Keine Meldungen.</p></div>
   </div>
 </div>
 
@@ -1353,21 +1358,7 @@
   function abgelaufen(l){
     return !!(l && l.Dauer && /^PT0*S$|^PT0M0*S$|^P?T?0S$/.test(l.Dauer));
   }
-  function warnung(id, l){
-    var w = el(id); if (!w) return;
-    if (abgelaufen(l)) {
-      w.textContent = 'Im Speicher der Gegenstelle steht eine abgelaufene Geltungsdauer ('
-        + l.Dauer + ') — dort lief einmal eine befristete Begrenzung. Die Steuerbox räumt sie beim '
-        + 'nächsten Schreibvorgang selbst weg: eine Vorgabe mit Dauer überschreibt sie, eine ohne '
-        + 'Dauer löscht sie ausdrücklich. Handlungsbedarf besteht nicht. Gefährlich wird dieser '
-        + 'Zustand nur, wenn der Löschfilter von Hand abgeschaltet ist (EEBusDelDur 0) — dann erbt '
-        + 'die nächste Vorgabe die tote Restlaufzeit und bleibt wirkungslos, trotz Erfolgsmeldung '
-        + 'auf beiden Seiten.';
-      w.classList.remove('hide');
-    } else {
-      w.classList.add('hide');
-    }
-  }
+
 
   function zust(l){
     if(!l) return '—';
@@ -1509,20 +1500,23 @@
   // Der Satz „Gesendet wird der Wert aus dem Feld" ist der eigentliche Zweck der Zeile: er sagt,
   // welche der beiden sichtbaren Zahlen gilt.
   function lppDiffZeigen(){
-    var e = el('lpp_diff'); if(!e) return;
+    lppDiff = '';
     var nenn = Math.abs(parseFloat(el('p_nenn').value));
     var pct  = parseFloat(el('p_pct').value);
     var feld = Math.abs(parseFloat(el('lpp_val').value));
-    if(isNaN(nenn) || isNaN(pct) || isNaN(feld) || !nenn){ e.classList.add('hide'); return; }
-    var w = Math.round(nenn * pct / 100);
-    if(w === Math.round(feld)){ e.classList.add('hide'); return; }   // stimmt überein -> still
-    var fpct = (feld / nenn * 100).toLocaleString('de-DE', {maximumFractionDigits: 1});
-    e.innerHTML = 'Rechner ergibt <b>' + w.toLocaleString('de-DE') + ' W</b> ('
+    if(!isNaN(nenn) && !isNaN(pct) && !isNaN(feld) && nenn){
+      var w = Math.round(nenn * pct / 100);
+      if(w !== Math.round(feld)){
+        var fpct = (feld / nenn * 100).toLocaleString('de-DE', {maximumFractionDigits: 1});
+        lppDiff = 'Einspeisung: der Rechner ergibt <b>' + w.toLocaleString('de-DE') + ' W</b> ('
                 + pct.toLocaleString('de-DE') + ' % von ' + nenn.toLocaleString('de-DE') + ' W), '
                 + 'im Feld stehen <b>' + feld.toLocaleString('de-DE') + ' W</b> (' + fpct + ' %). '
                 + '<b>Gesendet wird der Wert aus dem Feld.</b>';
-    e.classList.remove('hide');
+      }
+    }
+    meldungenZeigen();
   }
+
   function pctUebernehmen(){
     var w = pctZeigen();
     if(w === null){ say('Nennleistung und Prozentwert eintragen.'); return; }
@@ -1608,20 +1602,50 @@
     try { localStorage.setItem('eebus_ctl', v); } catch(e){}
     ctlListe(); controlZeigen();
   }
-  // Ist-Zustaende und Warnungen der Ziele (eine Zeile je Geraet, Name nur bei mehreren)
+  // Status (Grenzen + Ausgaenge je Zielgeraet) und Meldungen neu zeichnen
   function controlZeigen(){
-    var z = ziele();
-    ['lpc', 'lpp'].forEach(function(uc){
-      var key = (uc === 'lpc') ? 'Lim0' : 'Lim1', warn = null;
-      var h = z.map(function(g){
-        var l = daten[g.ski] ? daten[g.ski][key] : null;
-        if(!warn && abgelaufen(l)) warn = l;
-        return '<div>' + (z.length > 1 ? esc(g.name) + ': ' : '') + esc(zust(l)) + '</div>';
-      }).join('');
-      el(uc + '_state').innerHTML = h || '—';
-      warnung(uc + '_warn', warn);
-    });
     ausgaengeZeigen();
+    meldungenZeigen();
+  }
+  // Name eines Geraets zu einer SKI bzw. Adresse (Fundliste, sonst SHIP-ID, sonst Adresse)
+  function geraeteName(ski, ip, id){
+    var p = ski ? peers.filter(function(x){ return x.Ski && x.Ski.toLowerCase() === ski.toLowerCase(); })[0] : null;
+    return p ? ((p.Model || p.Id) + (p.Brand ? ' · ' + p.Brand : '')) : (id || ip || '—');
+  }
+  // Fehler/Info je Geraet. Ablehnung, Zeitueberschreitung u.ae. gelten als Fehler, der Rest als Info.
+  var lppDiff = '';   // Hinweis "Rechner und Grenzwert weichen ab" (allgemein, kein Geraet)
+  function meldungenZeigen(){
+    var m = [];
+    var istFehler = function(t){ return /fehler|abgelehnt|timeout|keine (quittung|antwort|verbindung|produce)|nicht (gefunden|uebernommen|bestaetigt)|abgebrochen|err=/i.test(t); };
+    slots.forEach(function(sl){
+      if(!sl.Ip || sl.State === 'idle') return;
+      var g = geraeteName(sl.PeerSki, sl.Ip, sl.PeerId);
+      if(sl.Error) m.push({ f: true, g: g, t: 'Verbindung: ' + sl.Error });
+      if(sl.LpcResult) m.push({ f: istFehler(sl.LpcResult), g: g, t: 'Grenze: ' + sl.LpcResult });
+      if(sl.FsResult) m.push({ f: istFehler(sl.FsResult), g: g, t: 'Failsafe: ' + sl.FsResult });
+    });
+    verbundene().forEach(function(g){
+      var d = daten[g.ski] || {};
+      [['Lim0', 'Bezug'], ['Lim1', 'Einspeisung']].forEach(function(k){
+        var l = d[k[0]];
+        if(abgelaufen(l)) m.push({ f: false, g: g.name, t: k[1] + ': im Gerät steht eine abgelaufene Geltungsdauer (' + l.Dauer
+          + '). Die Steuerbox räumt sie beim nächsten Schreiben selbst weg; Handlungsbedarf besteht nicht, '
+          + 'solange der Löschfilter nicht von Hand abgeschaltet ist (EEBusDelDur 0).' });
+      });
+    });
+    var z = ziele();
+    if(ledRegeln.some(function(r){ return r.q === 'LPP'; }) && !pvWp()
+       && z.some(function(g){ return daten[g.ski] && daten[g.ski].Lim1; })) {
+      m.push({ f: false, g: 'alle', t: 'Für die Einspeise-Ausgänge fehlt die installierte PV-Leistung (Settings → Anlage).' });
+    }
+    if(lppDiff) m.push({ f: false, g: 'alle', h: lppDiff });
+    if(!m.length){ el('meld').innerHTML = '<p class="hint" style="margin:0">Keine Meldungen.</p>'; return; }
+    m.sort(function(a, b){ return (b.f ? 1 : 0) - (a.f ? 1 : 0); });   // Fehler zuerst
+    el('meld').innerHTML = '<table class="fstab"><tr><th>Art</th><th>Gerät</th><th>Meldung</th></tr>'
+      + m.map(function(x){
+          return '<tr><td><span class="tag ' + (x.f ? 'fehler' : 'info') + '">' + (x.f ? 'Fehler' : 'Info') + '</span></td><td>'
+               + esc(x.g) + '</td><td>' + (x.h || esc(x.t)) + '</td></tr>';
+        }).join('') + '</table>';
   }
   // Failsafe-Werte aller verbundenen Geraete (Settings)
   function fsTabelle(){
@@ -1715,21 +1739,22 @@
     if(r.q === 'LPP') return r.n + ': Einspeisung auf ' + r.s + ' % begrenzt';
     return r.n + ': nicht belegt';
   }
-  // eine LED-Zeile je Zielgeraet; Schnellwahl markiert, was ALLE Ziele bestaetigen
+  // Status: eine Zeile je Zielgeraet mit bestaetigten Grenzen und Ausgaengen;
+  // Schnellwahl markiert, was ALLE Ziele bestaetigen
   function ausgaengeZeigen(){
-    var z = ziele(), h = '';
+    var z = ziele();
+    var h = '';
     z.forEach(function(g){
-      var d = daten[g.ski];
-      h += '<div class="ledrow">' + (z.length > 1 ? '<span class="ledname">' + esc(g.name) + '</span>' : '');
+      var d = daten[g.ski] || {};
+      h += '<tr><td>' + esc(g.name) + '</td><td class="mono">' + esc(zust(d.Lim0)) + '</td><td class="mono">' + esc(zust(d.Lim1)) + '</td><td>';
       ledRegeln.forEach(function(r){
         h += '<span class="ledi" title="' + esc(ledText(r)) + '"><span class="led ' + ledZustand(r, d) + '"></span>' + esc(r.n) + '</span>';
       });
-      h += '</div>';
+      h += '</td></tr>';
     });
-    el('leds').innerHTML = h || '<p class="hint">Kein verbundenes Gerät in der Auswahl.</p>';
-    var braucht = ledRegeln.some(function(r){ return r.q === 'LPP'; });
-    var lppDa = z.some(function(g){ return daten[g.ski] && daten[g.ski].Lim1; });
-    el('led_pv').classList.toggle('hide', !(braucht && lppDa && !pvWp()));
+    el('leds').innerHTML = h
+      ? '<table class="fstab"><tr><th>Gerät</th><th>Bezug § 14a</th><th>Einspeisung § 9</th><th>Ausgänge</th></tr>' + h + '</table>'
+      : '<p class="hint">Kein verbundenes Gerät in der Auswahl.</p>';
     function alle(f){ return z.length > 0 && z.every(function(g){ return f(daten[g.ski] || {}); }); }
     el('q_lpc_on').classList.toggle('sel', alle(function(d){ var c = d.Lim0, v = c ? num(c.Wert) : null; return !!(c && c.Aktiv && v !== null && Math.abs(v) === LPC_SCHNELL_W); }));
     el('q_lpc_off').classList.toggle('sel', alle(function(d){ return !!(d.Lim0 && !d.Lim0.Aktiv); }));
