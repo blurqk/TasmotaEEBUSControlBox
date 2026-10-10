@@ -446,7 +446,20 @@
       <b>Failsafe-Wert</b><span id="lpc_fsv">— W</span>
       <b>Failsafe-Mindestdauer</b><span id="lpc_fsd">—</span>
     </div>
-    <p class="hint">Failsafe-Werte gibt der Netzbetreiber vor — sie werden angezeigt, nicht geschrieben.</p>
+    <!-- Failsafe schreiben: gilt, wenn die Verbindung zur Steuerbox abreisst. Die Mindestdauer ist
+         EIN Schluessel fuer Bezug und Einspeisung gemeinsam und steht deshalb in beiden Reitern. -->
+    <div class="row">
+      <label>Failsafe-Wert [W]</label>
+      <input type="number" id="lpc_fs_in" min="0" step="100" placeholder="z. B. 4200">
+      <button class="sec" onclick="sendFs('bezug','lpc_fs_in')">Setzen</button>
+    </div>
+    <div class="row">
+      <label>Mindestdauer [s]</label>
+      <input type="number" id="fs_dur_lpc" min="0" max="86400" step="600" placeholder="7200">
+      <button class="sec" onclick="sendFs('dauer','fs_dur_lpc')">Setzen</button>
+    </div>
+    <p class="hint">Failsafe-Werte gelten, wenn die Verbindung zur Steuerbox abreißt. Die Mindestdauer gilt für
+      Bezug und Einspeisung gemeinsam; die Norm sieht 7200–86400&nbsp;s (2–24&nbsp;h) vor.</p>
   </section>
 
   <section id="t_lpp" class="card hide">
@@ -522,7 +535,18 @@
     <hr class="sep">
     <div class="info">
       <b>Failsafe-Wert</b><span id="lpp_fsv">— W</span>
+      <b>Failsafe-Mindestdauer</b><span id="lpp_fsd">—</span>
       <b>Nennleistung Erzeugung</b><span id="lpp_nom">— W</span>
+    </div>
+    <div class="row">
+      <label>Failsafe-Wert [W]</label>
+      <input type="number" id="lpp_fs_in" min="0" step="100" placeholder="Betrag, z. B. 6000">
+      <button class="sec" onclick="sendFs('einspeisung','lpp_fs_in')">Setzen</button>
+    </div>
+    <div class="row">
+      <label>Mindestdauer [s]</label>
+      <input type="number" id="fs_dur_lpp" min="0" max="86400" step="600" placeholder="7200">
+      <button class="sec" onclick="sendFs('dauer','fs_dur_lpp')">Setzen</button>
     </div>
     <p class="hint">Aus der Nennleistung lässt sich eine Prozent-Vorgabe des Netzbetreibers in Watt umrechnen.</p>
   </section>
@@ -1340,6 +1364,7 @@
       el('lpc_fsv').textContent = fmt(d.FsCons,  'W');
       el('lpc_fsd').textContent = d.FsDur || '—';
       el('lpp_fsv').textContent = fmt(d.FsProd,  'W');
+      el('lpp_fsd').textContent = d.FsDur || '—';
       // Nennleistung fuer die Prozent-Rechnung vorbelegen — aber NUR, solange nichts eingetragen
       // ist. Eine eigene Eingabe wird nie ueberschrieben. Quelle ist der Failsafe-Wert Erzeugung;
       // norm-richtig waere powerProductionNominalMax, das wir noch nicht lesen -> ehrlich benennen.
@@ -1564,6 +1589,26 @@
   }
   function pairStop(){ cmd('EEBusPair 0').then(function(j){ pairZeigen(j); say(JSON.stringify(j)); }); }
 
+  // --- Failsafe schreiben ----------------------------------------------------------------------------
+  // Der Treiber merkt das Schreiben nur vor und sendet im Sekundentakt; das Ergebnis steht danach in
+  // EEBusStatus (FsResult) und wird hier nach ein paar Sekunden gemeldet.
+  function sendFs(art, id){
+    if(needDevice()) return;
+    var v = parseFloat(String(el(id).value || '').replace(',', '.'));
+    if(!(v >= 0)){ say('Erst einen Wert eintragen.'); el(id).focus(); return; }
+    var ski = peers[selIdx].Ski.toLowerCase();
+    cmd('EEBusFailsafe ' + target() + ' ' + art + ' ' + Math.round(v)).then(function(j){
+      say(JSON.stringify(j));
+      setTimeout(function(){
+        cmd('EEBusStatus').then(function(s){
+          var sl = ((s && s.EEBusStatus && s.EEBusStatus.Slots) || []).filter(function(x){ return x.PeerSki && x.PeerSki.toLowerCase() === ski; })[0];
+          if(sl) say('Failsafe ' + art + ': ' + (sl.FsResult || '—'));
+        });
+        refresh();
+      }, 5000);
+    });
+  }
+
   // --- Schnellwahl ---------------------------------------------------------------------------------
   var LPC_SCHNELL_W = 4200;   // Mindestleistung einer steuerbaren Verbrauchseinrichtung nach § 14a EnWG
   var istLim = { lpc: null, lpp: null };   // zuletzt vom Geraet bestaetigte Grenzen
@@ -1662,7 +1707,7 @@
     el('led_cfg').innerHTML = h;
   }
 
-  var FELDER = ['lpc_val','lpc_dur','lpp_val','lpp_dur','p_nenn','p_pct','pv_wp'];
+  var FELDER = ['lpc_val','lpc_dur','lpp_val','lpp_dur','p_nenn','p_pct','pv_wp','lpc_fs_in','lpp_fs_in','fs_dur_lpc','fs_dur_lpp'];
   document.querySelectorAll('.zin').forEach(function(e){ if(e.id) FELDER.push(e.id); });
   FELDER.forEach(function(id){
     var e = el(id); if(!e) return;

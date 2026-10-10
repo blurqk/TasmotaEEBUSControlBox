@@ -64,6 +64,9 @@
                                   Pairing-QR-Codes (SHIP;SKI:..;ID:..;FPH256:..;SPSEC:..;ENDSHIP;)
                                   wird gespeichert, die Ankuendigung laeuft bis 15 min nach dem
                                   Verbinden. EEBusPair = Zustand, EEBusPair 0 = beenden und loeschen
+    EEBusFailsafe <ziel> bezug|einspeisung|dauer <wert>
+                                  Failsafe-Wert der Gegenstelle schreiben (W bzw. Sekunden); gilt,
+                                  wenn die Verbindung zur Steuerbox abreisst. Ergebnis: EEBusStatus
     EEBusShipId [<id>|0]          eigene SHIP-ID fest vorgeben (z.B. beim Uebernehmen der Identitaet
                                   einer anderen Steuerbox samt Zertifikat); wirkt nach Neustart
 
@@ -247,7 +250,7 @@ extern FS *ufsp;   // aktives FS (SD-Karte wenn gemountet) — fuer den SHIP-Mit
 const char kEebusCommands[] PROGMEM = D_PRFX_EEBUS "|"   // Prefix
   "Scan|Peers|Cert|Connect|Disconnect|Status|Trust|ConnectIp|Advertise|Log|"
   "Role|Lpc|ReleaseAll|Release|Target|Probe|Provide|Open|Hems|PeerMode|DelDur|"
-  "LppFrei|Lpp|Anmeld|Data|Mess|Struct|Read|AutoConn|Pair|ShipId";   // ReleaseAll VOR Release, LppFrei VOR Lpp (Praefix-Match!)
+  "LppFrei|Lpp|Anmeld|Data|Mess|Struct|Read|AutoConn|Pair|ShipId|Failsafe";   // ReleaseAll VOR Release, LppFrei VOR Lpp (Praefix-Match!)
 
 uint32_t EebusRetryMs(void);   // Abstand bis zum naechsten Verbindungsversuch (s. Pairing-Abschnitt)
 
@@ -259,7 +262,7 @@ void (* const EebusCommand[])(void) PROGMEM = {
   &CmndEebusTarget, &CmndEebusProbe, &CmndEebusProvide, &CmndEebusOpen, &CmndEebusHems,
   &CmndEebusPeerMode, &CmndEebusDelDur,
   &CmndEebusLppFrei, &CmndEebusLpp, &CmndEebusAnmeld, &CmndEebusData,
-  &CmndEebusMess, &CmndEebusStruct, &CmndEebusRead, &CmndEebusAutoConn, &CmndEebusPair, &CmndEebusShipId };
+  &CmndEebusMess, &CmndEebusStruct, &CmndEebusRead, &CmndEebusAutoConn, &CmndEebusPair, &CmndEebusShipId, &CmndEebusFailsafe };
 
 // Blind-Adressierung (Waermepumpen-Gateway liefert ihre Discovery nicht — VR940-Karte als Vorlage:
 // LoadControl/server auf entity 3 "HeatPumpAppliance"):
@@ -1326,7 +1329,11 @@ typedef struct {
    // pvCurtailmentLimitFactor am Netzanschlusspunkt) — beide fuehren keyId 0. Deshalb die Bedeutung
    // je QUELL-ENTITY merken, sonst landet der Prozentwert im Failsafe-Feld.
   int      cfg_ent[2] = { -1, -1 }; // bis zu zwei DeviceConfig-Entities
-  int8_t   cfg_code[2][6] = { { 0 } };   // je keyId: 1=failsafeConsW 2=failsafeDur 3=failsafeProdW 4=pvCurtailPct
+   // Bedeutung der Schluessel je Entity als Liste (keyId -> Code: 1=failsafeConsW 2=failsafeDur
+   // 3=failsafeProdW 4=pvCurtailPct). Frueher eine Tabelle mit keyId als Index (nur 0..5) — die
+   // WARP4 fuehrt ihre Failsafe-Schluessel unter keyId 11/12, die damit nie erkannt wurden.
+  int16_t  cfg_kid[2][6] = { { -1, -1, -1, -1, -1, -1 }, { -1, -1, -1, -1, -1, -1 } };
+  int8_t   cfg_kc[2][6]  = { { 0 } };
   long     fs_cons = 0;  int8_t fs_cons_sc = 0;  bool fs_cons_ok = false;
   long     fs_prod = 0;  int8_t fs_prod_sc = 0;  bool fs_prod_ok = false;
   char     fs_dur[16] = { 0 };   // Mindestdauer als Norm-Text, z.B. "PT2H"
@@ -1374,6 +1381,14 @@ typedef struct {
    // limitId je Richtung aus der LoadControl-Beschreibung (-1 = nicht gelernt). Bisher wurde
    // limitId 0 als Bezug und 1 als Einspeisung angenommen; das gilt nicht bei jeder Gegenstelle.
   int      lim_id[2]  = { -1, -1 };
+   // EEBusFailsafe: vorgemerktes Schreiben eines Failsafe-Werts (gesendet im Sekundentakt)
+  int8_t   fs_pend = 0;          // 0 = nichts, sonst Schluessel-Code: 1 Bezug W, 2 Dauer s, 3 Einspeisung W
+  long     fs_pend_val = 0;      // Wert in W bzw. s
+  uint8_t  fs_phase = 0;         // 0 = anstehend, 1 = Beschreibung angefragt, 2 = geschrieben, wartet auf Quittung
+  uint32_t fs_deadline = 0;
+  uint32_t fs_mc = 0;            // msgCounter des Writes (ordnet die Quittung zu)
+  uint32_t fs_readback_at = 0;   // millis() fuer das Zuruecklesen nach der Quittung (0 = keins)
+  char     fs_result[64] = { 0 };
   long     lim_val[2] = { 0, 0 };
   int8_t   lim_sc[2]  = { 0, 0 };
    // die vom Peer ZURUECKGEMELDETE Geltungsdauer je Grenze (aus dem Read-Back). Damit laesst
@@ -3550,6 +3565,28 @@ bool EebusJsonLong(const char *s, const char *key, long *out) {
   return true;
 }
 
+// DeviceConfig-Schluessel: Bedeutung (Code) zu einer keyId einer Entity eintragen bzw. nachschlagen
+void EebusCfgSet(int b, uint32_t kid, int8_t code) {
+  int frei = -1;
+  for (int i = 0; i < 6; i++) {
+    if (ESp->cfg_kid[b][i] == (int16_t)kid) { ESp->cfg_kc[b][i] = code; return; }
+    if ((frei < 0) && (ESp->cfg_kid[b][i] < 0)) { frei = i; }
+  }
+  if (frei >= 0) { ESp->cfg_kid[b][frei] = (int16_t)kid; ESp->cfg_kc[b][frei] = code; }
+}
+int8_t EebusCfgCode(int b, uint32_t kid) {
+  for (int i = 0; i < 6; i++) {
+    if (ESp->cfg_kid[b][i] == (int16_t)kid) { return ESp->cfg_kc[b][i]; }
+  }
+  return 0;
+}
+int EebusCfgKid(int b, int8_t code) {
+  for (int i = 0; i < 6; i++) {
+    if ((ESp->cfg_kid[b][i] >= 0) && (ESp->cfg_kc[b][i] == code)) { return ESp->cfg_kid[b][i]; }
+  }
+  return -1;
+}
+
 // scaledNumber {number, scale} lesen, ohne dass grosse Werte ueberlaufen. long ist auf dem ESP32 nur
 // 32 Bit und der Zehnerexponent wird als int8_t gefuehrt. Manche Gegenstellen (Weidmueller ERC)
 // melden "keine Grenze" mit einer Zahl, die beides sprengt; die Referenz-Umsetzung rechnet daraus
@@ -3752,7 +3789,7 @@ void EebusHarvest(const char *json, int src_ent) {
         EebusJsonInt(q, "keyId", &kid);
         nx = strstr(q + 8, "\"keyId\":");
         const char *kn = strstr(q, "\"keyName\":\"");
-        if (kn && (!nx || (kn < nx)) && (kid < 6)) {
+        if (kn && (!nx || (kn < nx))) {
           char s[40] = { 0 };
           EebusJsonStr(kn, "keyName", s, sizeof(s));
           int8_t code = 0;
@@ -3760,7 +3797,7 @@ void EebusHarvest(const char *json, int src_ent) {
           else if (0 == strcmp(s, "failsafeDurationMinimum"))             { code = 2; }
           else if (0 == strcmp(s, "failsafeProductionActivePowerLimit"))  { code = 3; }
           else if (0 == strcmp(s, "pvCurtailmentLimitFactor"))            { code = 4; }
-          ESp->cfg_code[b][kid] = code;
+          if (code) { EebusCfgSet(b, kid, code); }
         }
         q += 8;
       }
@@ -3777,8 +3814,8 @@ void EebusHarvest(const char *json, int src_ent) {
         uint32_t kid = 0;
         EebusJsonInt(q, "keyId", &kid);
         nx = strstr(q + 8, "\"keyId\":");
-        if (kid < 6) {
-          int8_t code = ESp->cfg_code[b][kid];
+        {
+          int8_t code = EebusCfgCode(b, kid);
           const char *vp = strstr(q, "\"scaledNumber\":[{\"number\":");
           const char *dp = strstr(q, "\"duration\":\"");
           if ((2 == code) && dp && (!nx || (dp < nx))) {
@@ -3880,6 +3917,7 @@ void EebusSpineHandle(const char *json) {
   uint32_t their_ctr = 0;
   EebusJsonInt(json, "msgCounter", &their_ctr);
   bool ack = (nullptr != strstr(json, "\"ackRequest\":true"));
+  EebusFsCheckResult(json);   // Quittung auf ein EEBusFailsafe-Write?
 
    // Adressen des Datagramms: von welchem Peer-Feature kam es, welches UNSERER Features ist gemeint?
   int peer_ent = 0, peer_feat = 0, our_ent = 0, our_feat = 0;
@@ -4877,6 +4915,148 @@ void CmndEebusPair(void) {
              EebusPair.fp, eebus_adv_id, EebusPair.own_fp, EebusPair.nonce, EebusPair.digest);
 }
 
+/*********************************************************************************************\
+ * Failsafe-Werte schreiben (EEBusFailsafe)
+ *
+ * Failsafe-Bezugsgrenze, -Einspeisegrenze und -Mindestdauer stehen als Schluessel im
+ * DeviceConfiguration-Feature der Gegenstelle (failsafeConsumptionActivePowerLimit,
+ * failsafeProductionActivePowerLimit, failsafeDurationMinimum). Sie gelten, wenn die Verbindung
+ * zur Steuerbox abreisst. Bisher schrieb der Treiber sie nur als feste Vorstufe des Limit-Writes
+ * im HEMS-Ablauf; dieser Befehl schreibt sie einzeln und mit frei waehlbarem Wert.
+ * Gesendet wird im Sekundentakt (nie waehrend der Befehlsbearbeitung, s. rd_pend).
+\*********************************************************************************************/
+
+// keyId des Schluessels mit diesem Code auf der DeviceConfig-Entity der Grenzen (-1 = unbekannt)
+int EebusFsKey(int code) {
+  for (int b = 0; b < 2; b++) {
+    if ((ESp->cfg_ent[b] < 0) || ((ESp->lpc_peer_ent >= 0) && (ESp->cfg_ent[b] != ESp->lpc_peer_ent))) { continue; }
+    int k = EebusCfgKid(b, code);
+    if (k >= 0) { return k; }
+  }
+  return -1;
+}
+
+void EebusFsSetResult(const char *txt) {
+  strlcpy(ESp->fs_result, txt, sizeof(ESp->fs_result));
+  AddLog(LOG_LEVEL_INFO, PSTR("EBG: Failsafe @ %s: %s"), ESp->peer_ip, txt);
+}
+
+void EebusFsWrite(int key) {
+  char v[80];
+  if (2 == ESp->fs_pend) {
+    char dur[24];
+    snprintf_P(dur, sizeof(dur), PSTR("PT%ldS"), ESp->fs_pend_val);
+    snprintf_P(v, sizeof(v), PSTR("{\"duration\":\"%s\"}"), dur);
+  } else {
+    snprintf_P(v, sizeof(v), PSTR("{\"scaledNumber\":[{\"number\":%ld},{\"scale\":0}]}"), ESp->fs_pend_val);
+  }
+  EebusLpcSendFailsafe(key, v);
+  ESp->fs_mc = ESp->spine_ctr - 1;   // die gerade verbrauchte Nummer — darauf bezieht sich die Quittung
+  ESp->fs_phase = 2;
+  ESp->fs_deadline = millis() + EEBUS_LPC_PHASE_TIMEOUT_MS;
+  char t[64];
+  snprintf_P(t, sizeof(t), PSTR("geschrieben (keyId %d, %ld %s)"), key, ESp->fs_pend_val, (2 == ESp->fs_pend) ? "s" : "W");
+  EebusFsSetResult(t);
+}
+
+// im Sekundentakt je Slot (ESp gesetzt)
+void EebusFsRun(void) {
+  if (ESp->fs_readback_at && TimeReached(ESp->fs_readback_at)) {
+    ESp->fs_readback_at = 0;
+    if ((SME_DONE == ESp->sme) && (ESp->lpc_peer_dcfg_feat >= 0)) {
+      EebusSpineSendAddr("read", false, 0, "{\"deviceConfigurationKeyValueListData\":[]}",
+                         EEBUS_LPC_CLIENT_ENT, 3, ESp->lpc_peer_ent, ESp->lpc_peer_dcfg_feat);
+    }
+  }
+  if (!ESp->fs_pend) { return; }
+  if (SME_DONE != ESp->sme) { ESp->fs_pend = 0; EebusFsSetResult("abgebrochen - keine Verbindung"); return; }
+  if (ESp->lpc_peer_dcfg_feat < 0) { ESp->fs_pend = 0; EebusFsSetResult("Gegenstelle hat keine DeviceConfiguration"); return; }
+
+  if (0 == ESp->fs_phase) {
+   // Binding auf das DeviceConfiguration-Feature (wiederholbar) — ohne Binding nehmen manche
+   // Gegenstellen keinen Write an.
+    char own[80]; EebusOwnDevice(own, sizeof(own));
+    char cmd[384];
+    snprintf_P(cmd, sizeof(cmd),
+      PSTR("{\"nodeManagementBindingRequestCall\":[{\"bindingRequest\":["
+           "{\"clientAddress\":[{\"device\":\"%s\"},{\"entity\":[%d]},{\"feature\":3}]},"
+           "{\"serverAddress\":[{\"device\":\"%s\"},{\"entity\":[%d]},{\"feature\":%d}]},"
+           "{\"serverFeatureType\":\"DeviceConfiguration\"}]}]}"),
+      own, EEBUS_LPC_CLIENT_ENT, ESp->peer_dev, ESp->lpc_peer_ent, ESp->lpc_peer_dcfg_feat);
+    EebusSpineSendAddr("call", false, 0, cmd, 0, 0, 0, 0);
+    int key = EebusFsKey(ESp->fs_pend);
+    if (key >= 0) { EebusFsWrite(key); return; }
+   // Schluessel noch unbekannt -> Beschreibung lesen, die Antwort lernt die Kennungen (EebusHarvest)
+    EebusSpineSendAddr("read", false, 0, "{\"deviceConfigurationKeyValueDescriptionListData\":[]}",
+                       EEBUS_LPC_CLIENT_ENT, 3, ESp->lpc_peer_ent, ESp->lpc_peer_dcfg_feat);
+    ESp->fs_phase = 1;
+    ESp->fs_deadline = millis() + EEBUS_LPC_PHASE_TIMEOUT_MS;
+    EebusFsSetResult("Schluessel-Beschreibung angefragt");
+    return;
+  }
+  if (1 == ESp->fs_phase) {
+    int key = EebusFsKey(ESp->fs_pend);
+    if (key >= 0) { EebusFsWrite(key); return; }
+    if (TimeReached(ESp->fs_deadline)) {
+      ESp->fs_pend = 0; ESp->fs_phase = 0;
+      EebusFsSetResult("Schluessel nicht gefunden - Gegenstelle fuehrt diesen Failsafe-Wert nicht");
+    }
+    return;
+  }
+  if ((2 == ESp->fs_phase) && TimeReached(ESp->fs_deadline)) {
+    ESp->fs_pend = 0; ESp->fs_phase = 0;
+    EebusFsSetResult("keine Quittung");
+    ESp->fs_readback_at = millis() + 500;   // trotzdem nachsehen, was jetzt dort steht
+  }
+}
+
+// Quittung auf unser Failsafe-Write? Zuordnung ueber die Nachrichtennummer.
+void EebusFsCheckResult(const char *json) {
+  if ((2 != ESp->fs_phase) || !ESp->fs_mc || (nullptr == strstr(json, "resultData"))) { return; }
+  char ref[40];
+  snprintf_P(ref, sizeof(ref), PSTR("\"msgCounterReference\":%u"), ESp->fs_mc);
+  const char *r = strstr(json, ref);
+  if ((nullptr == r) || isdigit((unsigned char)r[strlen(ref)])) { return; }
+  bool ok = (nullptr != strstr(json, "\"errorNumber\":0")) || (nullptr == strstr(json, "errorNumber"));
+  uint32_t en = 0;
+  EebusJsonInt(json, "errorNumber", &en);
+  char t[64];
+  if (ok) { snprintf_P(t, sizeof(t), PSTR("BESTAETIGT %ld %s"), ESp->fs_pend_val, (2 == ESp->fs_pend) ? "s" : "W"); }
+  else    { snprintf_P(t, sizeof(t), PSTR("ABGELEHNT (errorNumber %u)"), en); }
+  EebusFsSetResult(t);
+  ESp->fs_pend = 0; ESp->fs_phase = 0; ESp->fs_mc = 0;
+  ESp->fs_readback_at = millis() + 1500;   // neuen Wert zuruecklesen -> EEBusData
+}
+
+// EEBusFailsafe <idx|ski|hm> bezug|einspeisung|dauer <wert>
+void CmndEebusFailsafe(void) {
+  char a[3][48] = { { 0 }, { 0 }, { 0 } };
+  int n = 0;
+  if (XdrvMailbox.data_len > 0) {
+    char buf[160];
+    strlcpy(buf, XdrvMailbox.data, sizeof(buf));
+    for (char *tok = strtok(buf, " "); tok && (n < 3); tok = strtok(nullptr, " ")) { strlcpy(a[n++], tok, sizeof(a[0])); }
+  }
+  if (n < 3) { ResponseCmndChar_P(PSTR("Nutzung: EEBusFailsafe <idx|ski|hm> bezug|einspeisung|dauer <wert>  (W bzw. Sekunden)")); return; }
+  int8_t code = 0;
+  if      ((0 == strcasecmp(a[1], "bezug")) || (0 == strcasecmp(a[1], "lpc")))       { code = 1; }
+  else if ((0 == strcasecmp(a[1], "dauer")) || (0 == strcasecmp(a[1], "duration")))  { code = 2; }
+  else if ((0 == strcasecmp(a[1], "einspeisung")) || (0 == strcasecmp(a[1], "lpp"))) { code = 3; }
+  if (!code) { ResponseCmndChar_P(PSTR("Art: bezug, einspeisung oder dauer")); return; }
+  long val = atol(a[2]);
+  if (val < 0) { val = -val; }   // Betrag; Failsafe-Grenzen sind positive Werte
+  if ((2 == code) && ((val < 1) || (val > 86400))) { ResponseCmndChar_P(PSTR("Dauer 1..86400 s (Norm: 7200..86400)")); return; }
+  if (eebus_role < 1) { ResponseCmndChar_P(PSTR("Rolle AUS - erst EEBusRole 1 oder 2 (Steuerbox)")); return; }
+  if (!EebusSelectPeerArg(a[0])) { return; }
+  ESp->fs_pend = code;
+  ESp->fs_pend_val = val;
+  ESp->fs_phase = 0;
+  strlcpy(ESp->fs_result, "vorgemerkt", sizeof(ESp->fs_result));
+  Response_P(PSTR("{\"%s\":{\"Ip\":\"%s\",\"Art\":\"%s\",\"Wert\":%ld,\"Einheit\":\"%s\",\"Zustand\":\"vorgemerkt - Ergebnis in EEBusStatus (FsResult)\"}}"),
+             XdrvMailbox.command, ESp->peer_ip, (1 == code) ? "bezug" : (2 == code) ? "dauer" : "einspeisung",
+             val, (2 == code) ? "s" : "W");
+}
+
 void CmndEebusConnect(void) {
    // EEBusConnect <idx>  (Index aus EEBusPeers/EEBusScan). Bestehende Verbindungen zu
    // ANDEREN Peers bleiben stehen (Multi-Connection, EEBUS_MAX_CONN Slots).
@@ -5003,9 +5183,9 @@ void CmndEebusStatus(void) {
                  cc->peer_hb_tmo_s, cc->hb_lost_cnt, cc->hb_lost_at);
     }
     ResponseAppend_P(PSTR("%s{\"Slot\":%d,\"State\":\"%s\",\"Sme\":\"%s\",\"Ip\":\"%s\",\"Port\":%u,"
-                          "\"PeerSki\":\"%s\",\"PeerId\":\"%s\",\"Lpc\":\"%s\",\"LpcResult\":\"%s\",%s\"Error\":\"%s\"}"),
+                          "\"PeerSki\":\"%s\",\"PeerId\":\"%s\",\"Lpc\":\"%s\",\"LpcResult\":\"%s\",\"FsResult\":\"%s\",%s\"Error\":\"%s\"}"),
                      (i) ? "," : "", i, st, EebusSmeName(cc->sme), cc->peer_ip, cc->peer_port,
-                     cc->peer_ski, cc->peer_id, EebusLpcName(cc->lpc_state), cc->lpc_result, hbinfo, cc->err);
+                     cc->peer_ski, cc->peer_id, EebusLpcName(cc->lpc_state), cc->lpc_result, cc->fs_result, hbinfo, cc->err);
   }
   ResponseAppend_P(PSTR("]}}"));
 }
@@ -6722,6 +6902,7 @@ bool Xdrv126(uint32_t function) {
       for (int ci = 0; ci < EEBUS_MAX_CONN; ci++) {
         ESp = &EConn[ci];
         EebusTeardownNow();   // anstehende Client-Freigabe im sicheren Kontext
+        EebusFsRun();         // vorgemerktes EEBusFailsafe-Write
    // faelligen (verzoegerten/nachgepollten) Read-Back ausloesen. Hier statt in
    // EebusSmePoll, weil DIESER Loop auch die EINGEHENDEN (via_srv) Slots tickt — die
    // Waermepumpen-Gateway verbindet inbound, und EebusSmePoll kehrt fuer via_srv frueh zurueck.
