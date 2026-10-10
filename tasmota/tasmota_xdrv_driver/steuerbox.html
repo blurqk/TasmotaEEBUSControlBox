@@ -46,12 +46,16 @@
   :root{
     --bg:#0e1013; --panel:#1a1d22; --panel2:#22262d; --line:#333a44;
     --txt:#e6e8ea; --muted:#9aa4b0; --accent:#2f9be0; --ok:#37c871; --warn:#e0912f; --bad:#e05a4a;
+    /* Hervorhebung: Ueberschriften, Steuer-Buttons, aktive Seite. Waehlbar unter Settings → Darstellung */
+    --hl:#f28c28; --hl-txt:#111;
+    /* Rahmen um die Schnellwahl-Buttons, deren Zustand die Geraete bestaetigt haben */
+    --sel:#f28c28;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
   h1{font-size:20px;margin:0;padding:14px 16px;background:var(--panel);border-bottom:1px solid var(--line);
      display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
-  h2{font-size:15px;margin:0 0 12px;color:var(--accent);letter-spacing:.02em}
+  h2{font-size:15px;margin:0 0 12px;color:var(--hl);letter-spacing:.02em}
   h3{font-size:12px;margin:0 0 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
   .wrap{max-width:1080px;margin:0 auto;padding:14px}
   /* Bezug und Einspeisung nebeneinander; schmal untereinander */
@@ -66,6 +70,11 @@
   .fstab th,.fstab td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
   .fstab th{color:var(--muted);font-weight:600}
   .fstab td .ledi{margin-right:12px;display:inline-flex}
+  .cardhead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:0 0 12px}
+  .cardhead h2{margin:0}
+  .meldtab th:nth-child(1), .meldtab td:nth-child(1){width:1%;white-space:nowrap}
+  .meldtab th:nth-child(2), .meldtab td:nth-child(2){width:24%}
+  button.icon{padding:6px 9px;line-height:0}
   .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;border:1px solid}
   .tag.fehler{color:var(--bad);border-color:var(--bad)}
   .tag.info{color:var(--warn);border-color:var(--warn)}
@@ -88,7 +97,9 @@
   select,input[type=number],input[type=text]{
     width:100%;background:var(--panel2);color:var(--txt);border:1px solid var(--line);
     border-radius:6px;padding:7px 8px}
-  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:600}
+  button{background:var(--hl);color:var(--hl-txt);border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font-weight:600}
+  button:hover{filter:brightness(1.1)}
+  button.grau{background:#5a6370;color:#fff}
   button.sec{background:var(--panel2);border:1px solid var(--line);color:var(--txt)}
   button.bad{background:var(--bad)}
   /* Uebernahme-Knopf: der eine Klick, der das Rechenergebnis in das Feld bringt, das spaeter
@@ -136,14 +147,18 @@
   .warn{color:var(--warn);font-size:13px;border-left:3px solid var(--warn);
         padding:8px 12px;margin:10px 0 0;background:rgba(224,145,47,.09);border-radius:0 6px 6px 0}
   /* Rückweg zur Tasmota-Oberfläche — bewusst im Tasmota-Blau, damit er als deren Knopf erkennbar ist */
-  .tasmota{background:#1fa3ec;color:#fff;text-decoration:none;font-weight:600;font-size:14px;
+  .tasmota{background:#5a6370;color:#fff;text-decoration:none;font-weight:600;font-size:14px;
            border-radius:6px;padding:8px 22px;line-height:1}
-  .tasmota:hover{background:#0e8ad0}
+  .tasmota:hover{background:#6b7582}
+  h1 > span:first-child{color:var(--hl)}
   /* Seitenwahl in der Kopfzeile: Control / Connection / Settings. Die Seiten blenden nur Karten
      ein und aus — es wird nichts neu geladen, Auswahl und Eingaben bleiben erhalten. */
   .pages{display:flex;gap:6px;flex-wrap:wrap}
   .pages button{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:14px;padding:7px 16px}
-  .pages button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .pages button.active{background:var(--hl);border-color:var(--hl);color:var(--hl-txt)}
+  .swatches{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}
+  .swatch{width:32px;height:32px;padding:0;border-radius:7px;border:2px solid var(--line);cursor:pointer}
+  .swatch.active{border-color:var(--txt);box-shadow:0 0 0 2px var(--bg) inset}
   .pghide{display:none!important}
   .devbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .devbar .name{font-weight:600}
@@ -154,7 +169,7 @@
      und wird nur auf Wunsch gezeigt. */
   .eye{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:11px;
        padding:2px 8px;border-radius:5px;font-weight:600;cursor:pointer;margin-left:8px}
-  .eye:hover{color:var(--txt);border-color:var(--accent)}
+  .eye:hover{color:var(--txt);border-color:var(--hl)}
   /* Betriebsart der Verbindung — gruen = HEMS (Energiemanager), orange = SteuVE (Einzelgeraet).
      Die Farben sind nicht Zierde: der Frame-Aufbau unterscheidet sich, ein Verwechseln fuehrt zu
      einem stillschweigend abgelehnten Limit. */
@@ -165,19 +180,19 @@
   #peermodesrc{color:var(--muted);font-size:11px}
   /* Aufklappbarer Rechner — zugeklappt, damit die Bedienseite schlank bleibt */
   .calc{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:10px 0}
-  .calc summary{cursor:pointer;color:var(--accent);font-weight:600;user-select:none}
+  .calc summary{cursor:pointer;color:var(--hl);font-weight:600;user-select:none}
   .calc .hint{margin-top:8px}
   /* Eingabetabelle fuer die Grenzwert-Berechnung: vier Gruppen nebeneinander,
      je Gruppe vier Plaetze. Zehn wie im Tabellenblatt waeren fuer ein Haus unnoetig viel. */
   .ztab{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:10px 0}
   .zgrp{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px}
-  .zgrp h4{margin:0 0 6px;font-size:12px;color:var(--accent);text-transform:uppercase;letter-spacing:.04em}
+  .zgrp h4{margin:0 0 6px;font-size:12px;color:var(--hl);text-transform:uppercase;letter-spacing:.04em}
   .zrow{display:grid;grid-template-columns:16px 1fr;gap:6px;align-items:center;margin:3px 0}
   .zrow span{color:var(--muted);font-size:11px;text-align:right}
   .zrow input{min-width:0;padding:4px 6px;font-size:13px}
   .zsum{margin-top:7px;padding-top:6px;border-top:1px solid var(--line);
         font-size:11px;color:var(--muted);line-height:1.35}
-  .zerg{margin:10px 0 0;padding:9px 12px;background:var(--panel);border:1px solid var(--accent);
+  .zerg{margin:10px 0 0;padding:9px 12px;background:var(--panel);border:1px solid var(--hl);
         border-radius:6px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
   @media(max-width:760px){.ztab{grid-template-columns:1fr 1fr}}
   @media(max-width:420px){.ztab{grid-template-columns:1fr}}
@@ -187,7 +202,7 @@
   .sep{border:0;border-top:1px solid var(--line);margin:16px 0}
   /* Schnellwahl direkt unter den Ueberschriften der Grenzwert-Reiter */
   .quick{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0 12px}
-  .quick button.sel{outline:2px solid var(--ok);outline-offset:1px}
+  .quick button.sel{outline:2px solid var(--sel);outline-offset:2px}
   .quick button[disabled]{opacity:.45;cursor:not-allowed}
   .quick input{width:110px}
   .quick .hint{margin:0}
@@ -241,7 +256,7 @@
         Schlüssel als Datei herunter — vor jeder Neuerzeugung zu empfehlen.</span>
       <span>
         <button class="sec" onclick="identSichern()">Sichern</button>
-        <button class="bad" onclick="identNeu()">Neue Identität …</button>
+        <button onclick="identNeu()">Neue Identität …</button>
       </span>
     </div>
     <!-- Zweistufig mit Absicht: eine neue Identitaet macht JEDE bestehende Kopplung ungueltig.
@@ -326,29 +341,19 @@
     </div>
   </div>
 
-  <!-- ===== AUSGAENGE =====
-       Soll-Zustand der Relais-Ausgaenge (Weidmueller ERC: S1, S2, W3, W4) je Zielgeraet, aus den
-       Grenzen, die das Geraet ZURUECKGEMELDET hat. Zuordnung unter Settings. -->
-  <div class="card" id="c_leds" data-page="control">
-    <h2>Status</h2>
-    <p class="hint" style="margin-top:0">Grenzen, wie die Geräte sie bestätigt haben, und der daraus folgende
-      Soll-Zustand der Ausgänge — zum Vergleich mit den LEDs am Gerät. Gestrichelt = noch unbekannt.</p>
-    <div id="leds"></div>
-  </div>
-
   <!-- ===== BEZUG UND EINSPEISUNG NEBENEINANDER ===== -->
   <div class="duo" data-page="control">
     <section id="t_lpc" class="card">
       <h2>§ 14a EnWG — Bezug (LPC)</h2>
       <div class="quick fill">
         <button id="q_lpc_on" onclick="lpcSchnell(true)" title="Grenzwert 4200 W setzen und senden">Begrenzen · 4200 W</button>
-        <button id="q_lpc_off" class="sec" onclick="lpcSchnell(false)" title="Begrenzung aufheben">Keine Begrenzung</button>
+        <button id="q_lpc_off" onclick="lpcSchnell(false)" title="Begrenzung aufheben">Keine Begrenzung</button>
       </div>
       <div class="row2"><label>Grenzwert [W]</label><input type="number" id="lpc_val" value="" placeholder="z. B. 4200"></div>
       <div class="row2"><label>Dauer [s]</label><input type="number" id="lpc_dur" value="600" min="0" max="86400" step="60"></div>
       <div class="quick center">
         <button onclick="sendLpc()">Begrenzung setzen</button>
-        <button class="bad" onclick="freeLpc()">Aufheben</button>
+        <button class="grau" onclick="freeLpc()">Aufheben</button>
       </div>
     </section>
     <section id="t_lpp" class="card">
@@ -363,12 +368,20 @@
       <div class="row2"><label>Dauer [s]</label><input type="number" id="lpp_dur" value="600" min="0" max="86400" step="60"></div>
       <div class="quick center">
         <button onclick="sendLpp()">Begrenzung setzen</button>
-        <button class="bad" onclick="freeLpp()">Aufheben</button>
+        <button class="grau" onclick="freeLpp()">Aufheben</button>
       </div>
     </section>
   </div>
   <p class="hint" data-page="control" style="margin:-4px 0 14px">Dauer: 600&nbsp;s = 10&nbsp;Minuten ·
     0 = unbefristet · leer = Vorgabe des Treibers. Einspeisung als Betrag — das Vorzeichen setzt der Treiber.</p>
+
+  <!-- ===== AUSGAENGE =====
+       Soll-Zustand der Relais-Ausgaenge (Weidmueller ERC: S1, S2, W3, W4) je Zielgeraet, aus den
+       Grenzen, die das Geraet ZURUECKGEMELDET hat. Zuordnung unter Settings. -->
+  <div class="card" id="c_leds" data-page="control">
+    <h2>Status</h2>
+    <div id="leds"></div>
+  </div>
 
   <!-- ===== ANLAGE (Settings) ===== -->
   <div class="card" data-page="settings">
@@ -477,6 +490,19 @@
       keinen Failsafe für Einspeisung).</p>
   </div>
 
+  <!-- ===== DARSTELLUNG (Settings) ===== -->
+  <div class="card" data-page="settings">
+    <h2>Darstellung</h2>
+    <h3>Farbschema</h3>
+    <p class="hint" style="margin-top:0">Titel, Überschriften, Buttons und aktive Seite.</p>
+    <div class="swatches" id="farben"></div>
+    <h3 style="margin-top:14px">Highlighting</h3>
+    <p class="hint" style="margin-top:0">Rahmen um die Schnellwahl-Buttons unter § 14a und § 9, deren Zustand
+      die Geräte bestätigt haben.</p>
+    <div class="swatches" id="farben_sel"></div>
+    <p class="hint">Beide Einstellungen werden im Browser gemerkt.</p>
+  </div>
+
   <!-- ===== AUSGAENGE ZUORDNEN (Settings) ===== -->
   <div class="card" data-page="settings">
     <h2>Ausgänge zuordnen</h2>
@@ -561,8 +587,8 @@
        Das ist ihre Eigenschaft, kein Fehler dieses Werkzeugs — an anderen Geräten kann es anders sein.</p>
   </div>
 
-  <div class="card">
-    <h3>Antwort des Geräts</h3>
+  <div class="card" data-page="connection settings">
+    <h2>Antwort des Geräts</h2>
     <div id="log">bereit</div>
   </div>
 
@@ -571,7 +597,14 @@
        Warnkaesten in den Bedienbereichen. Aus EEBusStatus (Verbindungsfehler, Ergebnis des letzten
        Grenz- bzw. Failsafe-Schreibens) und EEBusData (abgelaufene Geltungsdauer im Geraet). -->
   <div class="card">
-    <h3>Meldungen</h3>
+    <div class="cardhead">
+      <h2>Meldungen</h2>
+      <button class="sec icon" onclick="meldungenLoeschen()" title="Meldungen löschen" aria-label="Meldungen löschen">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/>
+          <path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+      </button>
+    </div>
     <div id="meld"><p class="hint" style="margin:0">Keine Meldungen.</p></div>
   </div>
 </div>
@@ -1330,6 +1363,7 @@
     cmd('EEBusData').then(function(j){
       daten = {};
       ((j && j.EEBusData && j.EEBusData.Peers) || []).forEach(function(x){ if(x.Ski) daten[x.Ski.toLowerCase()] = x; });
+      datenGeladen = !!(j && j.EEBusData);
       controlZeigen();
       fsTabelle();
       // Connection-Seite: Messwerte des dort gewaehlten Geraets
@@ -1646,6 +1680,16 @@
   }
   // Fehler/Info je Geraet. Ablehnung, Zeitueberschreitung u.ae. gelten als Fehler, der Rest als Info.
   var lppDiff = '';   // Hinweis "Rechner und Grenzwert weichen ab" (allgemein, kein Geraet)
+  var meldAktuell = [];   // Schluessel der zuletzt ermittelten Meldungen
+  var datenGeladen = false;   // erst nach dem ersten EEBusData die Merkliste bereinigen
+  var meldWeg = (function(){ try { return JSON.parse(localStorage.getItem('eebus_meld_weg')) || []; } catch(e){ return []; } })();
+  function meldMerken(){ try { localStorage.setItem('eebus_meld_weg', JSON.stringify(meldWeg)); } catch(e){} }
+  // Papierkorb: alle gerade angezeigten Meldungen ausblenden
+  function meldungenLoeschen(){
+    meldAktuell.forEach(function(k){ if(meldWeg.indexOf(k) < 0) meldWeg.push(k); });
+    meldMerken();
+    meldungenZeigen();
+  }
   function meldungenZeigen(){
     var m = [];
     var istFehler = function(t){ return /fehler|abgelehnt|timeout|keine (quittung|antwort|verbindung|produce)|nicht (gefunden|uebernommen|bestaetigt)|abgebrochen|err=/i.test(t); };
@@ -1672,9 +1716,16 @@
       m.push({ f: false, g: 'alle', t: 'Für die Einspeise-Ausgänge fehlt die installierte PV-Leistung (Settings → Anlage).' });
     }
     if(lppDiff) m.push({ f: false, g: 'alle', h: lppDiff });
+    // geloeschte Meldungen ausblenden — solange sie unveraendert bestehen. Was verschwunden ist,
+    // faellt aus der Merkliste; kommt es spaeter wieder, wird es wieder angezeigt.
+    var schluessel = function(x){ return (x.f ? 'F' : 'I') + '|' + x.g + '|' + (x.t || x.h); };
+    meldAktuell = m.map(schluessel);
+    var weg = meldWeg.filter(function(k){ return meldAktuell.indexOf(k) >= 0; });
+    if(datenGeladen && (weg.length !== meldWeg.length)){ meldWeg = weg; meldMerken(); }
+    m = m.filter(function(x){ return meldWeg.indexOf(schluessel(x)) < 0; });
     if(!m.length){ el('meld').innerHTML = '<p class="hint" style="margin:0">Keine Meldungen.</p>'; return; }
     m.sort(function(a, b){ return (b.f ? 1 : 0) - (a.f ? 1 : 0); });   // Fehler zuerst
-    el('meld').innerHTML = '<table class="fstab"><tr><th>Art</th><th>Gerät</th><th>Meldung</th></tr>'
+    el('meld').innerHTML = '<table class="fstab meldtab"><tr><th>Art</th><th>Gerät</th><th>Meldung</th></tr>'
       + m.map(function(x){
           return '<tr><td><span class="tag ' + (x.f ? 'fehler' : 'info') + '">' + (x.f ? 'Fehler' : 'Info') + '</span></td><td>'
                + esc(x.g) + '</td><td>' + (x.h || esc(x.t)) + '</td></tr>';
@@ -1819,12 +1870,41 @@
     el('led_cfg').innerHTML = h;
   }
 
+  // --- Darstellung: Hervorhebungsfarbe (16 zur Auswahl) ----------------------------------------------
+  var FARBEN = ['#f28c28','#e05a4a','#e8558a','#d65db1','#9b6ae0','#7c5cff','#5b6ee1','#2f9be0',
+                '#22b8d8','#1fb5a5','#37c871','#8ccf3f','#e9c53a','#f2b134','#b07a4a','#8a96a3'];
+  // Zwei Paletten: hl = Farbschema (Titel, Ueberschriften, Buttons), sel = Highlighting (Rahmen aktiver Auswahl).
+  // Bei hl wird die Schrift auf Buttons schwarz (helle Farbe) bzw. weiss (dunkle Farbe).
+  var FARB_KEY = { hl: 'eebus_farbe', sel: 'eebus_farbe_sel' };
+  function farbeSetzen(c, art){
+    art = art || 'hl';
+    if(FARBEN.indexOf(c) < 0) c = FARBEN[0];
+    document.documentElement.style.setProperty('--' + art, c);
+    if(art === 'hl'){
+      var r = parseInt(c.substr(1, 2), 16), g = parseInt(c.substr(3, 2), 16), b = parseInt(c.substr(5, 2), 16);
+      document.documentElement.style.setProperty('--hl-txt', ((0.299 * r + 0.587 * g + 0.114 * b) > 150) ? '#111' : '#fff');
+    }
+    try { localStorage.setItem(FARB_KEY[art], c); } catch(e){}
+    document.querySelectorAll('.swatch[data-a="' + art + '"]').forEach(function(x){ x.classList.toggle('active', x.dataset.c === c); });
+  }
+  function farbenZeigen(){
+    [['hl', 'farben'], ['sel', 'farben_sel']].forEach(function(z){
+      el(z[1]).innerHTML = FARBEN.map(function(c){
+        return '<button class="swatch" data-a="' + z[0] + '" data-c="' + c + '" style="background:' + c + '" title="' + c
+             + '" onclick="farbeSetzen(\'' + c + '\',\'' + z[0] + '\')"></button>';
+      }).join('');
+      var c = null;
+      try { c = localStorage.getItem(FARB_KEY[z[0]]); } catch(e){}
+      farbeSetzen(c || FARBEN[0], z[0]);
+    });
+  }
+
   // --- Seiten (Control / Connection / Settings) ----------------------------------------------------
   // Die gewaehlte Seite steht in der Adresse (#control usw.), damit Neuladen und Lesezeichen sie behalten.
   var SEITEN = ['control', 'connection', 'settings'];
   function seite(p){
     if(SEITEN.indexOf(p) < 0) p = 'control';
-    document.querySelectorAll('[data-page]').forEach(function(e){ e.classList.toggle('pghide', e.dataset.page !== p); });
+    document.querySelectorAll('[data-page]').forEach(function(e){ e.classList.toggle('pghide', e.dataset.page.split(' ').indexOf(p) < 0); });
     document.querySelectorAll('.pages button').forEach(function(b){ b.classList.toggle('active', b.dataset.p === p); });
     if(location.hash !== '#' + p) history.replaceState(null, '', '#' + p);
   }
@@ -1858,6 +1938,7 @@
   el('ownskibtn').textContent = skiHidden ? 'zeigen' : 'verbergen';
   ownIdentLaden();
   startAuswahl();
+  farbenZeigen();
   seite(location.hash.substring(1));
   window.addEventListener('hashchange', function(){ seite(location.hash.substring(1)); });
   pairLaden();
